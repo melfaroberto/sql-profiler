@@ -1,0 +1,627 @@
+================================================================================
+                    SQL PROFILER - GUIDA ALL'USO
+        Come registrare le query SQL di un programma su qualsiasi computer
+================================================================================
+
+INDICE
+  1. A cosa serve
+  2. Come funziona (in breve)
+  3. Cosa serve sul computer
+  4. Installazione
+  5. Passo 1 - Scoprire come il programma si collega al database
+  6. Passo 2 - Avviare il profiler
+  7. Passo 3 - Far passare il programma attraverso il profiler
+  8. Passo 4 - Verificare che funzioni
+  9. Passo 5 - Registrare le azioni
+ 10. Passo 6 - Esportare i risultati
+ 11. Casi particolari (altro computer, impostazioni non modificabili, ...)
+ 12. Problemi frequenti
+ 13. Provarlo senza il programma vero (la demo Mini Shop)
+ 14. Attenzione: sicurezza e buone pratiche
+ 15. Riepilogo veloce
+
+
+--------------------------------------------------------------------------------
+1. A COSA SERVE
+--------------------------------------------------------------------------------
+
+SQL Profiler registra tutte le query SQL che un programma (per esempio il
+gestionale "legacy" che stiamo analizzando) invia al suo database, mentre lo
+usi normalmente.
+
+Per ogni azione che fai nel programma (es. "Login", "Salva ordine") puoi
+vedere:
+  - quali query vengono eseguite, in che ordine e con quali valori;
+  - quali tabelle vengono lette, scritte o cancellate;
+  - quali colonne vengono modificate;
+  - quanto tempo impiega ogni query e quante righe restituisce;
+  - i collegamenti tra tabelle usati dal programma (JOIN), anche quelli che
+    nello schema NON sono dichiarati come chiave esterna ("relazioni
+    candidate").
+
+Il programma analizzato NON viene modificato: si cambia solo l'indirizzo a cui
+si collega.
+
+Database supportati: MySQL / MariaDB e PostgreSQL.
+(SQL Server e Oracle NON sono supportati.)
+
+
+--------------------------------------------------------------------------------
+2. COME FUNZIONA (IN BREVE)
+--------------------------------------------------------------------------------
+
+Normalmente:
+
+    [Programma] ---------------------------------> [Database :3306]
+
+Con il profiler:
+
+    [Programma] ---> [SQL Profiler :3307] -------> [Database :3306]
+                            |
+                            +--> registra e analizza le query
+                            +--> le mostra nella dashboard
+
+Il profiler fa da "intermediario" (proxy): il programma si collega al
+profiler invece che al database, il profiler inoltra tutto al database vero e
+intanto legge le query che passano.
+
+Termini usati nella guida:
+  - PORTA DI ASCOLTO: la porta del profiler a cui si collega il programma
+    (es. 3307).
+  - DATABASE (host:porta): l'indirizzo del database vero (es. 192.168.1.20:3306).
+  - SESSIONE: un gruppo di query registrate durante una singola azione.
+
+
+--------------------------------------------------------------------------------
+3. COSA SERVE SUL COMPUTER
+--------------------------------------------------------------------------------
+
+  - Python 3.10 o più recente (va bene anche Anaconda).
+      Windows: scaricarlo da https://www.python.org/downloads/ e durante
+      l'installazione spuntare "Add python.exe to PATH".
+  - Le librerie Python "sqlglot" e "aiohttp" (vedi installazione).
+  - Il permesso di modificare le impostazioni di connessione del programma da
+    analizzare (o, in alternativa, i diritti di amministratore - vedi cap. 11).
+  - Facoltativo: lo schema del database, cioè la cartella con i dump .sql
+    (es. Dump20261015-1) oppure il modello .json esportato da SQL FK Finder.
+    Serve per vedere chiavi primarie, chiavi esterne e relazioni.
+
+
+--------------------------------------------------------------------------------
+4. INSTALLAZIONE
+--------------------------------------------------------------------------------
+
+Ci sono due modi di usare il profiler. Scegline uno.
+
+A) APP DESKTOP (consigliata, come SQL FK Finder)
+   -------------------------------------------
+   File da copiare sul computer (si trovano in sql-profiler/electron/dist/):
+     - Linux:   SQL-Profiler-1.0.0-linux-x86_64.AppImage
+                (oppure SQL-Profiler-1.0.0-linux-x64.tar.gz)
+     - Windows: SQL-Profiler-1.0.0-portable.exe
+
+   Linux:   rendere eseguibile il file (una volta sola) e avviarlo:
+              chmod +x SQL-Profiler-1.0.0-linux-x86_64.AppImage
+              ./SQL-Profiler-1.0.0-linux-x86_64.AppImage
+   Windows: doppio clic su SQL-Profiler-1.0.0-portable.exe
+
+   Al primo avvio, se mancano le librerie Python, l'app chiede se installarle:
+   rispondere "Install" (serve internet, solo la prima volta, circa un minuto).
+
+   NOTA: la versione Windows è stata creata ma non ancora provata su Windows.
+   Se dà problemi, usare il modo B.
+
+B) DA RIGA DI COMANDO (funziona ovunque ci sia Python)
+   ---------------------------------------------------
+   Copiare tutta la cartella "sql-profiler" sul computer, poi in un terminale
+   (Windows: "Prompt dei comandi" o "Anaconda Prompt"):
+
+       cd percorso/della/cartella/sql-profiler
+       pip install -r requirements.txt
+
+   Se il computer NON ha internet:
+     sul computer di casa (con internet):
+       pip download -r requirements.txt -d wheels
+     copiare la cartella "wheels" sul computer di lavoro, poi:
+       pip install --no-index --find-links wheels -r requirements.txt
+
+
+--------------------------------------------------------------------------------
+5. PASSO 1 - SCOPRIRE COME IL PROGRAMMA SI COLLEGA AL DATABASE
+--------------------------------------------------------------------------------
+
+Serve sapere:
+  - HOST del database (nome o indirizzo IP, es. "dbserver" o 192.168.1.20,
+    oppure 127.0.0.1 / localhost se il database è sullo stesso computer);
+  - PORTA (di solito 3306 per MySQL/MariaDB, 5432 per PostgreSQL);
+  - DOVE si trova questa impostazione nel programma.
+
+Dove cercare:
+  - file di configurazione nella cartella del programma (.ini, .xml, .config,
+    .properties, .json, .conf);
+  - su Windows: "Origine dati ODBC" (cercare "ODBC" nel menu Start, oppure
+    eseguire odbcad32) se il programma usa una DSN ODBC;
+  - una schermata "Impostazioni / Connessione" nel programma stesso.
+
+Se non lo trovi, guarda la connessione mentre il programma è aperto:
+  Windows:  netstat -ano | findstr 3306
+  Linux:    ss -tnp | grep 3306
+Nella colonna dell'indirizzo remoto c'è host:porta del database.
+
+IMPORTANTE: prima di cambiare qualsiasi cosa, fai una COPIA di backup del file
+o annota le impostazioni originali.
+
+
+--------------------------------------------------------------------------------
+6. PASSO 2 - AVVIARE IL PROFILER
+--------------------------------------------------------------------------------
+
+Scegli una PORTA DI ASCOLTO libera, diversa da quella del database
+(es. 3307 per MySQL, 5433 per PostgreSQL).
+
+A) APP DESKTOP
+   1. Avvia l'app. Compare la scritta "No proxy is running yet...".
+   2. Clicca "Configure..." (o il pulsante "⚙ Settings" in alto a destra).
+   3. Nella tabella "Proxies" compila:
+        Protocol       : MySQL / MariaDB  (oppure PostgreSQL)
+        Listen port    : 3307
+        Database host  : l'host trovato al passo 1 (es. 192.168.1.20)
+        Database port  : la porta trovata al passo 1 (es. 3306)
+      Sotto la riga compare il promemoria: "point the target software to
+      127.0.0.1:3307 instead of 192.168.1.20:3306".
+   4. Schema (facoltativo): pulsante "File..." per un modello .json o un file
+      .sql, "Folder..." per la cartella dei dump. Lo puoi aggiungere anche
+      più tardi.
+   5. Clicca "Save and apply".
+   In alto compaiono:  "mysql 127.0.0.1:3307 -> 192.168.1.20:3306 · 0 conn"
+   e, se hai indicato lo schema, "schema: N tables, M links".
+   Le impostazioni vengono salvate: al prossimo avvio ripartono da sole.
+
+B) RIGA DI COMANDO
+   Dalla cartella sql-profiler:
+
+     python -m sqlprofiler run --proxy mysql:3307:192.168.1.20:3306 --schema percorso/Dump20261015-1 --open
+
+   Consigliato: aggiungi  --profiles profiles  per tenere separato il lavoro
+   su ogni applicazione (vedi "Profili" qui sotto).
+
+   Significato di --proxy:  PROTOCOLLO:PORTA_ASCOLTO:HOST_DATABASE:PORTA_DATABASE
+   PostgreSQL:              --proxy postgres:5433:192.168.1.20:5432
+
+PROFILI: UNA CARTELLA PER OGNI APPLICAZIONE
+   Ogni volta che inizi ad analizzare un'applicazione nuova crea un profilo
+   ("Profile 1", "Profile 2", ... oppure un nome tuo, es. "Gestionale X").
+   Ogni profilo è una cartella con dentro:
+       history.sqlite   le sessioni e le query catturate
+       settings.json    i proxy e lo schema di quell'applicazione
+   Così le query di un'applicazione non si mescolano mai con un'altra.
+
+   - App desktop: i profili ci sono sempre (cartella "profiles" nella
+     cartella dei dati, vedi cap. 10).
+   - Riga di comando: avvia con  --profiles <cartella>, per esempio
+         python -m sqlprofiler run --profiles profiles --open
+     (al primo avvio crea profiles/Profile 1).
+
+   Nella dashboard, in alto a sinistra accanto a "SQL Profiler", c'è il menu
+   dei profili:
+     - scegli un profilo per passare a quello (si ricaricano le sue sessioni,
+       i suoi proxy e il suo schema);
+     - "＋ New profile..." per crearne uno nuovo: proponendo il nome
+       "Profile N" (lo puoi cambiare). Il nuovo profilo parte con gli stessi
+       proxy di quello attuale e senza schema: controlla in "⚙ Settings".
+   Il profiler riparte sempre dall'ultimo profilo usato.
+   Per eliminare un profilo: chiudi il profiler e cancella la sua cartella.
+   --open apre la dashboard nel browser (http://127.0.0.1:8780).
+
+   Per salvare le impostazioni tra un avvio e l'altro e modificarle dalla
+   dashboard ("⚙ Settings"), aggiungere:  --config impostazioni.json
+
+   Il terminale va lasciato aperto: per fermare il profiler premere Ctrl+C.
+
+
+--------------------------------------------------------------------------------
+7. PASSO 3 - FAR PASSARE IL PROGRAMMA ATTRAVERSO IL PROFILER
+--------------------------------------------------------------------------------
+
+Nelle impostazioni di connessione del programma (trovate al passo 1) cambia
+SOLO:
+    host  ->  127.0.0.1
+    porta ->  3307   (la porta di ascolto scelta)
+
+Utente, password e nome del database restano IDENTICI.
+
+Poi CHIUDI e RIAPRI il programma, così si collega di nuovo passando dal
+profiler. (Avvia sempre prima il profiler e poi il programma.)
+
+Se il programma gira su un ALTRO computer rispetto al profiler, o se non puoi
+cambiare le impostazioni, vedi il capitolo 11.
+
+
+--------------------------------------------------------------------------------
+8. PASSO 4 - VERIFICARE CHE FUNZIONI
+--------------------------------------------------------------------------------
+
+Con il programma aperto, guarda la riga in alto nella dashboard:
+
+  - Riquadro del proxy VERDE con "1 conn" (o più): il programma è collegato
+    attraverso il profiler.  OK
+  - Riquadro con "0 conn": il programma non passa dal profiler (controlla le
+    impostazioni del passo 3 e riavvia il programma).
+  - Riquadro ROSSO con "TLS!": il programma pretende una connessione cifrata;
+    le query non si possono leggere (vedi capitolo 12).
+
+Ora fai qualcosa nel programma (apri una schermata): nella tabella centrale
+devono comparire le query, una per riga, in tempo reale.
+
+Prova facoltativa con il client mysql (se installato), PRIMA di toccare il
+programma:
+    mysql -h 127.0.0.1 -P 3307 -u UTENTE -p
+    SELECT 1;
+La query deve comparire nella dashboard.
+
+
+--------------------------------------------------------------------------------
+9. PASSO 5 - REGISTRARE LE AZIONI
+--------------------------------------------------------------------------------
+
+Per ogni azione da analizzare:
+
+  1. Nella casella in alto scrivi il nome dell'azione, es. "Salva ordine".
+  2. Clicca "Start recording" (il pulsante diventa rosso e parte il timer).
+  3. Esegui l'azione nel programma (SOLO quella).
+  4. Clicca "Stop recording".
+
+La sessione compare nella colonna "Sessions" a sinistra. Cliccandola vedi
+solo le sue query. Cliccando una query, a destra trovi:
+  - "Formatted": la query ben formattata;
+  - "With values": la query con i valori reali al posto dei "?";
+  - "As sent": la query esattamente come è stata inviata;
+  - i parametri, il diagramma delle tabelle coinvolte (chiavi PK/FK,
+    linee tratteggiate arancioni = relazione usata ma non dichiarata),
+    le colonne usate e i JOIN.
+
+SOTTO-AZIONI (SOTTO-SESSIONI), A QUALSIASI PROFONDITÀ
+  Un'azione può avere delle sotto-azioni, e ognuna può averne altre.
+  Esempio:  Customers › Search › Open customer card
+                      › Add customer
+  1. Registra l'azione principale ("Customers", Start recording). In alto
+     compare la barra rossa REC con il percorso di ciò che stai registrando.
+  2. Nella riga sotto (↳) scrivi "Search" e premi Invio o "＋ Start
+     sub-action": la sotto-azione si apre DENTRO quella in corso.
+  3. Ripeti per scendere ancora ("Open customer card" dentro "Search").
+  4. "■ Stop “Open customer card”" chiude solo la sotto-azione più interna e
+     torna a registrare in quella che la contiene ("Search"). Premilo due
+     volte per tornare a "Customers", poi avvia "Add customer".
+  5. "Stop recording" chiude tutto.
+  Nella colonna Sessions le sotto-azioni formano un albero: la freccia ▾/▸
+  apre o chiude i rami.
+  - Selezionando una sessione chiusa, la riga ↳ permette di aggiungerle una
+    sotto-azione anche dopo.
+  - Dentro una sessione, "Group selected..." sposta le query selezionate in
+    una nuova sotto-azione di quella sessione.
+  - Eliminando una sessione si eliminano anche le sue sotto-azioni (le query
+    restano, in "Outside sessions").
+
+PANORAMICA DI UNA SESSIONE: TABELLE, ATTRIBUTI E DIAGRAMMA
+  Cliccando una sessione o sotto-azione, a destra compare la panoramica (si
+  riapre con "▦ Overview" o con "← Overview" dalla vista di una query):
+    - numeri: query, tabelle, tabelle scritte, sotto-azioni, durata;
+    - l'elenco delle sotto-azioni (cliccabili);
+    - "Tables and attributes used": TUTTE le tabelle usate dalla sessione e
+      da tutte le sue sotto-azioni, con accesso (read/write), numero di
+      query, "In schema?" (✓ yes / ✗ no) e gli attributi (colonne) usati:
+        azzurro = letto (SELECT), arancio = filtro (WHERE / JOIN),
+        rosso = scritto (INSERT / UPDATE), corsivo = non è nello schema.
+      Cliccando una riga la griglia mostra solo le query di quella tabella;
+    - il diagramma delle tabelle e dei loro collegamenti (rotellina = zoom,
+      trascina = sposta, "Fit" = adatta), con le colonne usate evidenziate.
+  Si aggiorna mentre registri. Sopra la griglia c'è anche una riga veloce
+  con le tabelle: cliccane una per filtrare, "✕ show all" per togliere il
+  filtro.
+
+FILE DA SCARICARE ("⬇ Download")
+  Sulla sessione (comprende le sue sotto-azioni) e, in alto a sinistra,
+  per tutto il profilo:
+    - Queries and details (.md) / Queries (.json): tutte le query;
+    - Tables and attributes (.md): documento leggibile con tabelle usate,
+      "In schema?" e attributi, sessione per sessione (con le sotto-azioni);
+    - Tables and attributes (.csv, Excel): una riga per tabella e attributo;
+      le colonne "scope" e "session_path" dicono a quale profilo / sessione /
+      sotto-sessione si riferisce, "attribute_usage" come è usato;
+    - Diagram of tables and links (.html): pagina grafica che si apre con
+      doppio clic nel browser (anche senza internet) con il diagramma delle
+      tabelle usate e dei collegamenti, e sotto l'elenco di tabelle e
+      attributi. Ha il pulsante "Print / PDF" per salvarla in PDF.
+
+TABELLE DEL PROFILO (USATE E MAI USATE)
+  In fondo alla colonna Sessions c'è "▦ Tables of the profile" con il
+  conteggio "N used · M unused". Cliccandolo vedi, aggiornati in tempo reale:
+    - quante tabelle sono usate, mai usate e la copertura dello schema (%);
+    - "Never used": le tabelle dello schema che nessuna query del profilo ha
+      toccato (serve lo schema, vedi Settings);
+    - "Used": tabelle usate con accesso, query, sessioni, "In schema?" e
+      attributi; il diagramma di tutte le tabelle usate;
+    - i pulsanti per scaricare tabelle e attributi (.csv / .md) e il
+      diagramma (.html) dell'intero profilo.
+
+Consigli:
+  - Una sessione per ogni azione, con un nome chiaro.
+  - Aspetta che il programma abbia finito prima di premere "Stop".
+  - La casella "Hide noise" (attiva di default) nasconde le query tecniche del
+    driver (SET, SHOW, SELECT @@...). Toglila se vuoi vedere proprio tutto.
+  - Hai dimenticato di premere Start? Seleziona le righe con le caselle a
+    sinistra (Maiuscolo+clic per un intervallo) e usa "Group selected...".
+  - Nel campo "Notes" della sessione puoi scrivere cosa hai fatto: finisce
+    anche nell'esportazione.
+  - La cronologia resta salvata anche chiudendo il profiler.
+
+
+--------------------------------------------------------------------------------
+10. PASSO 6 - ESPORTARE I RISULTATI
+--------------------------------------------------------------------------------
+
+  - Una sessione: selezionala e clicca "Export .md" (documento leggibile) o
+    "Export .json" (dati completi).
+  - Tutte le sessioni: "Export all" in alto a sinistra.
+  - Eliminare tutte le sessioni: "Delete all" in alto a sinistra (chiede
+    anche se eliminare le loro query o tenerle come "Outside sessions").
+  - Eliminare tutte le query catturate (dentro e fuori dalle sessioni):
+    "Delete all queries" nella barra sopra la griglia. Le sessioni restano,
+    vuote. Riguarda solo il profilo attuale.
+  - Da riga di comando:
+        python -m sqlprofiler sessions                     (elenco)
+        python -m sqlprofiler export --session 3 -o salva_ordine.md
+        python -m sqlprofiler export -o tutto.md           (tutte)
+
+Il file Markdown contiene per ogni azione: tabelle coinvolte (lettura /
+scrittura), colonne scritte, JOIN osservati con le relazioni candidate,
+query distinte e la sequenza completa con i valori.
+
+Dove sono i dati:
+  App desktop, Linux:   ~/.config/SQL Profiler/profiles/<profilo>/
+  App desktop, Windows: %APPDATA%\SQL Profiler\profiles\<profilo>\
+                        (profiler.log resta in SQL Profiler\)
+  Riga di comando:      con --profiles: <cartella>/<profilo>/history.sqlite
+                        senza: sqlprofiler.sqlite nella cartella da cui lo
+                        avvii (o il file indicato con --db)
+  Per esportare da riga di comando un profilo:
+        python -m sqlprofiler export --db "profiles/Profile 1/history.sqlite" -o tutto.md
+
+
+--------------------------------------------------------------------------------
+11. CASI PARTICOLARI
+--------------------------------------------------------------------------------
+
+A) Il database è sullo stesso computer del programma
+   Proxy:  porta di ascolto 3307 -> database 127.0.0.1:3306.
+   Nel programma: 127.0.0.1, porta 3307.
+
+B) Il programma gira su un ALTRO computer rispetto al profiler
+   - Nelle impostazioni del profiler spunta "Accept connections from other
+     computers" (riga di comando: --listen-host 0.0.0.0).
+   - Nel programma metti l'indirizzo IP del computer dove gira il profiler
+     (non 127.0.0.1) e la porta 3307.
+   - Sul computer del profiler il firewall deve permettere la porta 3307
+     (Windows: "Windows Defender Firewall" -> regola in entrata per la porta).
+
+C) Non si possono cambiare le impostazioni del programma
+   Funziona solo se il programma si collega al database tramite un NOME
+   (es. "dbserver") e non un indirizzo IP. Servono i diritti di amministratore.
+   1. Trova l'IP vero del database (es. con: ping dbserver).
+   2. Modifica il file hosts aggiungendo la riga:
+          127.0.0.1   dbserver
+      Windows: C:\Windows\System32\drivers\etc\hosts  (Blocco note "come
+               amministratore")
+      Linux:   /etc/hosts  (con sudo)
+   3. Avvia il profiler sulla STESSA porta del database, verso l'IP vero:
+          --proxy mysql:3306:IP_VERO_DEL_DATABASE:3306
+      (nell'app: Listen port 3306, Database host = IP vero)
+      La porta 3306 deve essere libera sul computer del profiler.
+   4. ALLA FINE togli la riga dal file hosts, altrimenti il programma non
+      trova più il database quando il profiler è spento.
+
+D) Più database
+   Aggiungi più righe di proxy ("+ Add proxy"), ognuna con la sua porta di
+   ascolto (3307, 3308, ...).
+
+
+--------------------------------------------------------------------------------
+12. PROBLEMI FREQUENTI
+--------------------------------------------------------------------------------
+
+"No proxy is running yet"
+    Non hai ancora configurato il proxy: "⚙ Settings" (cap. 6).
+
+Banner rosso "cannot listen on 127.0.0.1:3307: address already in use"
+    La porta è occupata (forse un altro profiler è già aperto). Scegli
+    un'altra porta di ascolto (3308, 3317, ...) e aggiorna il programma.
+
+Il riquadro del proxy resta a "0 conn"
+    Il programma non passa dal profiler: controlla host/porta nel programma,
+    riavvia il programma, controlla il firewall (caso 11-B).
+
+Il programma dà errore di connessione quando passa dal profiler
+    - Controlla nella dashboard l'host e la porta del database: devono essere
+      quelli originali del programma.
+    - Il database deve essere raggiungibile dal computer del profiler.
+    - Log dell'app: profiler.log nella cartella dei dati (cap. 10).
+
+Riquadro ROSSO "TLS!" / nessuna query visibile
+    Il programma richiede una connessione cifrata (SSL/TLS obbligatorio).
+    Il profiler lascia comunque funzionare il programma ma non può leggere le
+    query. Cerca nelle impostazioni del programma/driver un'opzione SSL/TLS e
+    mettila su "preferred" / "prefer" / "disabled".
+    (Con MySQL 8 e connessione non cifrata alcuni driver chiedono
+    l'opzione allowPublicKeyRetrieval=true.)
+
+Compaiono query "/* prepared statement #N ... */"
+    Il programma aveva preparato quelle query prima che il profiler fosse
+    avviato. Chiudi e riapri il programma DOPO aver avviato il profiler.
+
+Nel diagramma le tabelle sono grigie / senza chiavi
+    Lo schema non è caricato o non contiene quelle tabelle: indicalo in
+    "⚙ Settings" -> Schema.
+
+L'app desktop non si apre (Linux)
+    Avviala da terminale per vedere i messaggi:
+        ./SQL-Profiler-1.0.0-linux-x86_64.AppImage
+    e guarda ~/.config/SQL Profiler/profiler.log
+    Se manca libfuse2:  sudo apt install libfuse2
+    (in alternativa usare il file .tar.gz: estrarlo e avviare "sql-profiler")
+
+L'app chiede di installare Python / le librerie
+    Installa Python 3.10+ (cap. 3) e riapri l'app; per le librerie rispondi
+    "Install" (serve internet una volta). Se Python è in un percorso strano,
+    avvia l'app con la variabile SQLPROFILER_PYTHON=percorso/di/python.
+
+Il programma non funziona più dopo aver chiuso il profiler
+    È normale: punta ancora alla porta del profiler. Rimetti le impostazioni
+    originali (cap. 14).
+
+
+--------------------------------------------------------------------------------
+13. PROVARLO SENZA IL PROGRAMMA VERO (LA DEMO "MINI SHOP")
+--------------------------------------------------------------------------------
+
+Nella cartella demo/ c'è un piccolo gestionale web (Mini Shop) che usa
+MySQL come un programma "vero": login con controllo dei permessi, clienti,
+ordini salvati in una transazione, controllo del magazzino, log di audit.
+Serve per imparare a usare il profiler senza rischi. Usa il server MySQL
+installato sul computer (porta 3306) e tocca solo il database shop_demo.
+
+  Mini Shop  -->  profiler :3317  -->  MySQL :3306 (database shop_demo)
+                       |
+                  dashboard http://127.0.0.1:8780
+
+A) PREPARAZIONE (una volta sola)
+   1. Librerie Python:
+        cd sql-profiler
+        pip install -r requirements.txt -r demo/requirements.txt
+   2. Database e utente della demo (serve la password di amministratore):
+        sudo mysql < demo/mysql_user.sql
+      Crea il database shop_demo e l'utente shop / password Shop-Demo-2026,
+      che può usare solo quel database.
+      (Su Windows: apri demo/mysql_user.sql in MySQL Workbench ed eseguilo.)
+
+B) AVVIO
+        demo/run_demo.sh --fresh
+   --fresh ricrea shop_demo con i dati di esempio (5 clienti, 6 prodotti,
+   12 ordini). Le volte successive puoi ometterlo per tenere i dati.
+   Se MySQL non è sulla 3306:  MYSQL_PORT=3307 demo/run_demo.sh
+   Nel terminale deve comparire:
+        profile: Profile 1 (demo/profiles/Profile 1)
+        mysql:3317: listening on 127.0.0.1:3317 -> 127.0.0.1:3306
+        schema: 7 tables, 4 declared foreign keys from demo/schema.sql
+   Lascia aperto il terminale. Apri nel browser:
+        dashboard:  http://127.0.0.1:8780
+        Mini Shop:  http://127.0.0.1:8090
+
+C) CONTROLLO VELOCE
+   Nella dashboard in alto devono esserci:
+     - il profilo "Profile 1";
+     - "mysql 127.0.0.1:3317 -> 127.0.0.1:3306 · N conn" in verde
+       (Mini Shop è già collegato);
+     - "schema: 7 tables, ...".
+   Se il chip è rosso o a 0 conn, vedi cap. 12.
+
+D) TEST 1 - REGISTRARE UN'AZIONE A MANO (il lavoro che farai col programma vero)
+   1. Dashboard: scrivi "Login" nel campo in alto, premi Start recording.
+   2. Mini Shop: accedi con admin / admin (pulsante Log in).
+   3. Dashboard: premi Stop recording.
+   4. Clicca la sessione "Login" a sinistra: vedi le query del login
+      (SELECT sugli utenti, INSERT nel log di audit, ...).
+   5. Clicca una query: a destra il SQL formattato, i valori dei parametri e
+      il mini diagramma delle tabelle.
+   Ripeti con altre azioni, una sessione per ciascuna:
+     - "Cerca clienti"    Customers -> scrivi "Roma" -> Search
+     - "Scheda cliente"   Customers -> clicca un cliente
+     - "Nuovo cliente"    Customers -> compila il modulo -> Add
+     - "Salva ordine"     New order -> 2 prodotti -> Save order
+                          (qui vedi BEGIN, SELECT ... FOR UPDATE, INSERT,
+                          UPDATE del magazzino, COMMIT)
+     - "Ordine senza magazzino"  New order con 999 pezzi: vedi il ROLLBACK
+     - "Annulla ordine"   apri l'ordine -> Cancel order
+     - "Report"           Reports
+     - "Logout"           Logout
+
+E) TEST 2 - PROVA AUTOMATICA
+   In un SECONDO terminale:
+        python demo/scenario.py
+   Esegue da solo 10 azioni (login sbagliato, login, ricerca, scheda
+   cliente, nuovo cliente, ordine, ordine senza magazzino, annullamento,
+   report, logout), ognuna come sessione, e scrive il resoconto in
+   demo/scenario-report.md. Confronta le sessioni con quelle del test 1.
+
+F) TEST 3 - ESPORTARE
+   - Seleziona una sessione e premi "Export .md": aprilo e controlla tabelle
+     lette/scritte, JOIN e sequenza delle query.
+   - "Export all" per tutte le sessioni.
+
+G) TEST 4 - SESSIONI DIMENTICATE E PULIZIA
+   1. Senza premere Start, fai qualcosa in Mini Shop: le query finiscono in
+      "Outside sessions".
+   2. Selezionale con le caselle a sinistra e usa "Group selected...".
+   3. "Clear unassigned": cancella le query fuori dalle sessioni.
+   4. "Delete all queries": cancella tutte le query (le sessioni restano
+      vuote); "Delete all" accanto a "Sessions": cancella le sessioni.
+
+H) TEST 5 - PROFILI
+   1. Menu del profilo in alto a sinistra -> "＋ New profile..." -> conferma
+      "Profile 2". La dashboard si ricarica vuota: è un'altra applicazione.
+   2. Il proxy è lo stesso, quindi Mini Shop continua a essere registrato:
+      registra un'azione qui.
+   3. Torna a "Profile 1": ritrovi tutte le sessioni di prima.
+   4. Le cartelle sono in demo/profiles/.
+
+I) TEST 6 - MYSQL WORKBENCH ATTRAVERSO IL PROFILER
+   In Workbench crea una connessione:
+        Hostname 127.0.0.1, Port 3317, Username shop,
+        Default Schema shop_demo, scheda SSL: Use SSL = No
+   Password: Shop-Demo-2026. Registra una sessione "Workbench" mentre esegui
+   per esempio  SELECT * FROM customers;  e guarda anche le query che
+   Workbench manda da solo.
+   Se dà "Authentication requires secure connection": collegati una volta
+   direttamente (porta 3306), poi riprova sulla 3317.
+
+J) FERMARE
+   Ctrl+C nel terminale della demo. MySQL resta acceso come sempre.
+   Per eliminare la demo dal server:
+        sudo mysql -e "DROP DATABASE shop_demo; DROP USER 'shop'@'localhost', 'shop'@'127.0.0.1';"
+
+
+--------------------------------------------------------------------------------
+14. ATTENZIONE: SICUREZZA E BUONE PRATICHE
+--------------------------------------------------------------------------------
+
+  - Chiedi il permesso a chi gestisce il sistema prima di intercettare il
+    traffico del suo database.
+  - Il profiler legge soltanto, ma le azioni che fai nel programma sono
+    REALI: se salvi un ordine, l'ordine viene salvato. Se possibile usa un
+    database di test o una copia; sul database di produzione preferisci azioni
+    di sola lettura.
+  - Le query registrate contengono DATI VERI (nomi, importi, ...): tratta il
+    file della cronologia (history.sqlite / sqlprofiler.sqlite) e le
+    esportazioni come documenti riservati.
+  - Le password non vengono mai salvate dal profiler.
+  - Il profiler disattiva la cifratura (TLS) della connessione per poterla
+    leggere: usalo in un ambiente controllato.
+  - ALLA FINE rimetti le impostazioni ORIGINALI del programma (host e porta,
+    oppure togli la riga dal file hosts): se il profiler è spento e il
+    programma punta ancora alla porta del profiler, non trova il database.
+
+
+--------------------------------------------------------------------------------
+15. RIEPILOGO VELOCE
+--------------------------------------------------------------------------------
+
+  1. Trova host e porta del database usati dal programma (e fai un backup
+     delle impostazioni).
+  2. Avvia SQL Profiler e configura il proxy:
+        porta di ascolto 3307  ->  host:porta del database.
+  3. Nel programma metti 127.0.0.1 e porta 3307; riavvia il programma.
+  4. Controlla che il riquadro del proxy sia verde ("1 conn" o più).
+  5. Per ogni azione: nome -> Start recording -> azione -> Stop recording.
+  6. Esporta (.md / .json).
+  7. Rimetti le impostazioni originali del programma.
+
+================================================================================

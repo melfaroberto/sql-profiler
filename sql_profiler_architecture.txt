@@ -1,0 +1,147 @@
+================================================================================
+                    SQL PROFILER & INTERCEPTOR ARCHITECTURE
+                      High-Level Design & Implementation Guide
+================================================================================
+
+1. OBJECTIVE
+--------------------------------------------------------------------------------
+To develop an application (SQL Profiler/Sniffer) that intercepts, logs, and 
+analyzes database queries executed by a target software in real-time. This tool 
+will assist in reverse engineering the software's backend logic by mapping UI 
+interactions (e.g., clicking a button) to their corresponding database operations.
+
+2. ARCHITECTURAL APPROACH
+--------------------------------------------------------------------------------
+Since the goal is to "sniff" traffic without altering the original application's 
+source code, the best approach is to build a Database Proxy Server or a 
+Native Log Tailing mechanism. 
+
+Recommended Approach: The Local Database Proxy
+The application will act as a middleman (proxy) between the target software 
+and the actual database. 
+- The target software is reconfigured (via connection string or local DNS) 
+  to connect to your Profiler (e.g., localhost:3307).
+- The Profiler forwards the raw TCP traffic to the actual database (e.g., 
+  localhost:3306), extracting and logging the SQL statements in transit.
+
+3. CORE COMPONENTS
+--------------------------------------------------------------------------------
+The application will be divided into four main modules. 
+
+A. The Interceptor (Proxy/Sniffer Engine)
+   - Function: Listens on a local port, accepts connections from the target app, 
+     and forwards packets to the real database.
+   - Mechanism: Decodes the database-specific protocol (e.g., Postgres wire 
+     protocol or MySQL client/server protocol) just enough to extract the raw 
+     SQL query strings.
+   - Output: Yields raw SQL queries, timestamps, and execution duration.
+
+B. The Parser & Analyzer
+   - Function: Takes the raw SQL from the Interceptor and analyzes it.
+   - Mechanism: Utilizes `sqlglot` (already used in your static analyzer) to:
+     1. Format/Beautify the query.
+     2. Identify the query type (SELECT, INSERT, UPDATE, DELETE).
+     3. Extract the affected tables and columns.
+   - Integration: It cross-references the extracted tables with the output of 
+     your existing `sql-fk-finder` tool to show relationships and primary keys.
+
+C. The Session & Tagging Manager
+   - Function: Allows you and Enrico to tag a specific stream of queries with 
+     a UI action (e.g., "User Login", "Save Invoice").
+   - Mechanism: Provides a "Start/Stop Recording" toggle. All queries captured 
+     during that window are grouped under a specific Session ID and Label.
+
+D. The Real-Time Dashboard (Web/Electron UI)
+   - Function: Visualizes the intercepted queries dynamically.
+   - Mechanism: A local web server (like the one in `sqlfk.server`) pushes new 
+     queries to the frontend via WebSockets (or Server-Sent Events). 
+
+4. HIGH-LEVEL WORKFLOW (Data Pipeline)
+--------------------------------------------------------------------------------
+1. [Target App] executes a query -> 
+2. [Proxy Interceptor] catches the TCP packet, extracts SQL -> 
+3. [Parser] categorizes the SQL and links it to schema metadata -> 
+4. [Storage] saves the query to a local SQLite database for historical review -> 
+5. [Dashboard] receives the event via WebSocket and renders it on screen.
+
+5. HIGH-LEVEL PSEUDO-CODE & INTERFACES
+--------------------------------------------------------------------------------
+Below is a high-level representation of the core classes. This is purely 
+architectural (not fully implemented) to illustrate the software design.
+
+```python
+class DatabaseProxy:
+    """
+    Listens for incoming connections from the target software and forwards 
+    traffic to the real database, extracting SQL queries in transit.
+    """
+    def __init__(self, listen_port, target_db_host, target_db_port):
+        self.listen_port = listen_port
+        self.target_db_host = target_db_host
+        self.target_db_port = target_db_port
+
+    def start(self):
+        # Start TCP listener
+        pass
+
+    def on_query_intercepted(self, raw_sql, execution_time):
+        # Triggered when a complete SQL statement is detected in the stream
+        QueryAnalyzer.process(raw_sql, execution_time)
+
+
+class QueryAnalyzer:
+    """
+    Parses the intercepted SQL, extracts metadata, and maps it to the 
+    static schema analyzed by sql-fk-finder.
+    """
+    @staticmethod
+    def process(raw_sql, execution_time):
+        # 1. Use sqlglot to parse the query
+        # 2. Extract table names: e.g., ["users", "orders"]
+        # 3. Format the SQL for readability
+        # 4. Broadcast to the UI
+        parsed_data = {
+            "query": raw_sql,
+            "type": "SELECT", # Extracted from AST
+            "tables": ["orders"], # Extracted from AST
+            "duration_ms": execution_time
+        }
+        WebSocketServer.broadcast(parsed_data)
+
+
+class SessionManager:
+    """
+    Groups intercepted queries into logical actions to help with 
+    the reverse engineering process.
+    """
+    def start_recording(self, action_name):
+        # E.g., action_name = "Click 'Add New Customer' Button"
+        pass
+        
+    def stop_recording(self):
+        # Saves the session to the local SQLite database
+        pass
+```
+
+6. USER INTERFACE (UI) SPECIFICATIONS
+--------------------------------------------------------------------------------
+The frontend (similar to your DBeaver-style React/HTML interface) should feature:
+- A Control Panel: Input fields to name the current action (e.g., "Save Order") 
+  and a prominent "Start/Stop Sniffing" button.
+- A Live Log Grid: A scrolling table showing Timestamp, Query Type, Target 
+  Tables, and Execution Time.
+- A Detail View: Clicking a query in the grid shows the fully formatted SQL, 
+  highlighted syntax, and a mini ER-diagram (reusing the `sqlfk/grafici` logic) 
+  showing *only* the tables involved in this specific query.
+- Export Feature: Export the mapped sessions to a JSON or Markdown file to 
+  document how the legacy software works internally.
+
+7. ADVANTAGES OF THIS DESIGN
+--------------------------------------------------------------------------------
+- Zero-Touch: The legacy software does not need to be modified; you only change 
+  where it connects.
+- Seamless Integration: By using Python and SQLite (just like `sql-fk-finder`), 
+  you can directly import your statically analyzed schema and combine it with 
+  dynamic runtime behavior.
+- Targeted Context: Grouping queries by user action allows you to cleanly isolate 
+  how features are implemented in the legacy system.

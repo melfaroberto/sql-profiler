@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SQL Profiler</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1><span class="logo">⇄</span> SQL Profiler</h1>
+    <select id="profile-select" class="profile-select" hidden
+            title="Profile: one per application you profile, each with its own sessions, queries and settings"></select>
+    <div id="proxies" class="chips"></div>
+    <div class="spacer"></div>
+    <div id="schema-chip" class="chip muted" title="Static schema used to cross-reference tables">no schema</div>
+    <div id="ws-state" class="chip muted" title="Live connection to the profiler">offline</div>
+    <button id="settings-btn" class="small" type="button" title="Proxies and schema">⚙ Settings</button>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+
+  <section class="control">
+    <div class="control-row">
+      <input id="action" type="text" autocomplete="off"
+             placeholder="What are you about to do in the program? e.g. “Customers”, “Save order” — then press Start">
+      <div id="rec-live" class="rec-live" hidden>
+        <span class="rec-badge"><span class="dot"></span>REC</span>
+        <nav id="rec-path" class="crumbs" aria-label="Being recorded"></nav>
+        <span id="rec-info" class="rec-info"></span>
+      </div>
+      <button id="rec" class="rec" type="button"><span class="dot"></span><span id="rec-text">Start recording</span></button>
+    </div>
+    <div id="sub-wrap" class="control-row sub-wrap" hidden>
+      <span class="sub-icon" aria-hidden="true">↳</span>
+      <input id="sub-action" type="text" autocomplete="off">
+      <button id="sub-rec" class="small-rec" type="button">＋ Start sub-action</button>
+      <button id="sub-stop" class="small-rec stop" type="button" hidden></button>
+    </div>
+  </section>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="side-head">
+        <h2>Sessions</h2>
+        <div class="menu-wrap">
+          <button id="export-all" class="small" type="button" title="Download everything recorded in this profile">⬇ Download ▾</button>
+          <div id="export-menu" class="menu" hidden>
+            <div class="menu-title">All sessions</div>
+            <a data-dl="queries-md">Queries and details (.md)</a>
+            <a data-dl="queries-json">Queries (.json)</a>
+            <div class="menu-title">Tables of the profile</div>
+            <a data-dl="tables-md">Tables and attributes (.md)</a>
+            <a data-dl="tables-csv">Tables and attributes (.csv, Excel)</a>
+            <a data-dl="er-html">Diagram of tables and links (.html)</a>
+          </div>
+        </div>
+        <button id="delete-all" class="small danger" type="button" title="Delete every session of this profile">Delete all sessions</button>
+      </div>
+      <ul id="sessions" class="sessions"></ul>
+      <button id="tables-btn" class="tables-btn" type="button" title="Tables used and never used by this profile, updated live">
+        <span>▦ Tables of the profile</span><span id="tables-count" class="n"></span></button>
+    </aside>
+
+    <section class="center">
+      <div id="session-head" class="session-head" hidden>
+        <div class="session-title">
+          <nav id="session-crumbs" class="crumbs"></nav>
+          <input id="session-label" class="session-label" type="text" title="Click to rename">
+        </div>
+        <div class="session-actions">
+          <button id="session-overview" class="small" type="button" title="Tables, attributes and diagram of this session">▦ Overview</button>
+          <div class="menu-wrap">
+            <button id="session-export" class="small" type="button" title="Download this session, with its sub-actions">⬇ Download ▾</button>
+            <div id="session-export-menu" class="menu" hidden>
+              <div class="menu-title">This session and its sub-actions</div>
+              <a data-dl="queries-md">Queries and details (.md)</a>
+              <a data-dl="queries-json">Queries (.json)</a>
+              <a data-dl="tables-md">Tables and attributes (.md)</a>
+              <a data-dl="tables-csv">Tables and attributes (.csv, Excel)</a>
+              <a data-dl="er-html">Diagram of tables and links (.html)</a>
+            </div>
+          </div>
+          <button id="session-delete" class="small danger" type="button">Delete</button>
+        </div>
+        <textarea id="session-notes" rows="1" placeholder="Notes about this action (included in the export)…"></textarea>
+        <div id="session-tables" class="session-tables"></div>
+      </div>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Filter SQL text…">
+        <select id="type-filter" title="Statement type">
+          <option value="">All types</option>
+          <option>SELECT</option><option>INSERT</option><option>UPDATE</option><option>DELETE</option>
+          <option>REPLACE</option><option>CALL</option><option>BEGIN</option><option>COMMIT</option>
+          <option>ROLLBACK</option><option>SET</option><option>SHOW</option><option>CREATE</option>
+          <option>ALTER</option><option>DROP</option><option>MULTI</option>
+        </select>
+        <input id="table-filter" type="search" placeholder="Table…" list="table-names">
+        <datalist id="table-names"></datalist>
+        <label class="check" title="Hide SET, SHOW, SELECT @@… issued by drivers and pools">
+          <input id="hide-noise" type="checkbox" checked> Hide noise</label>
+        <label class="check" title="Keep the newest query in view"><input id="follow" type="checkbox" checked> Follow</label>
+        <span id="fp-chip" class="chip" hidden></span>
+        <div class="spacer"></div>
+        <button id="group-btn" class="small" type="button" hidden>Group selected…</button>
+        <button id="clear-btn" class="small" type="button" title="Delete the queries shown that belong to no session">Clear unassigned</button>
+        <button id="clear-all-btn" class="small danger" type="button" title="Delete every captured query, in sessions and outside">Delete all queries</button>
+        <span id="count" class="muted"></span>
+      </div>
+      <div id="grid-wrap" class="grid-wrap" tabindex="0">
+        <table id="grid" class="grid">
+          <thead>
+            <tr>
+              <th class="c-sel"><input id="sel-all" type="checkbox" title="Select all shown"></th>
+              <th class="c-id">#</th><th class="c-time">Time</th><th class="c-conn">Conn</th>
+              <th class="c-type">Type</th><th class="c-tables">Tables</th><th>Statement</th>
+              <th class="c-num">ms</th><th class="c-num">Rows</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="empty" class="empty">
+          <p><b>No queries yet.</b></p>
+          <p>Point the target software to the proxy address shown at the top instead of the real database,
+             then use it normally: every statement appears here as it runs.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="detail" class="detail">
+      <div class="placeholder">Select a session to see its tables and diagram, or a query to see its SQL.</div>
+    </section>
+  </main>
+
+  <dialog id="settings-dlg" class="dlg">
+    <form id="settings-form" method="dialog">
+      <h2>Settings</h2>
+      <h3>Proxies</h3>
+      <p class="muted">The target software connects to the <b>listen port</b> of this computer instead of the database;
+        the profiler forwards everything to the <b>database</b> address.</p>
+      <table class="kv proxies">
+        <thead><tr><th>Protocol</th><th>Listen port</th><th>Database host</th><th>Database port</th><th></th></tr></thead>
+        <tbody id="proxy-rows"></tbody>
+      </table>
+      <button id="add-proxy" class="small" type="button">＋ Add proxy</button>
+      <p class="field">
+        <label class="check"><input id="listen-all" type="checkbox">
+          Accept connections from other computers (listen on 0.0.0.0 instead of 127.0.0.1)</label>
+      </p>
+      <h3>Schema</h3>
+      <p class="muted">sql-fk-finder model (.json), a folder of .sql dumps, or one .sql file. Used to show keys and
+        relationships; optional.</p>
+      <div class="path-row">
+        <input id="schema-path" type="text" placeholder="/path/to/Dump20261015-1 or model.json">
+        <button class="small desktop-only" type="button" data-pick="schema-path" data-kind="file">File…</button>
+        <button class="small desktop-only" type="button" data-pick="schema-path" data-kind="folder">Folder…</button>
+      </div>
+      <details>
+        <summary>Advanced: analyse the dumps with sql-fk-finder</summary>
+        <p class="muted">Folder that contains the <code>sqlfk</code> package (in the sql-fk-finder app: its
+          <code>resources</code> folder). Adds the foreign keys it infers; needs its Python libraries.</p>
+        <div class="path-row">
+          <input id="sqlfk-path" type="text" placeholder="(not used)">
+          <button class="small desktop-only" type="button" data-pick="sqlfk-path" data-kind="folder">Folder…</button>
+        </div>
+      </details>
+      <div id="settings-problems" class="error-box" hidden></div>
+      <p id="settings-saved" class="muted small-note"></p>
+      <div class="dlg-actions">
+        <button id="settings-cancel" type="button">Cancel</button>
+        <button id="settings-save" class="primary" type="submit">Save and apply</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="ask-dlg" class="dlg ask">
+    <form id="ask-form" method="dialog">
+      <h2 id="ask-title"></h2>
+      <p id="ask-text" class="muted"></p>
+      <input id="ask-input" type="text" autocomplete="off">
+      <div class="dlg-actions">
+        <button id="ask-cancel" type="button">Cancel</button>
+        <button class="primary" type="submit">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/sqlhl.js"></script>
+  <script src="/static/er.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

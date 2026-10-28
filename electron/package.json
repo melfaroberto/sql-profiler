@@ -1,0 +1,40 @@
+{
+  "name": "sql-profiler",
+  "productName": "SQL Profiler",
+  "version": "1.0.0",
+  "description": "Captures and analyses the SQL executed by a legacy application, grouped by UI action",
+  "main": "main.js",
+  "author": "Roberto",
+  "license": "MIT",
+  "private": true,
+  "desktopName": "sql-profiler.desktop",
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "dist": "electron-builder --linux AppImage tar.gz",
+    "dist:win": "electron-builder --win portable -c.win.signAndEditExecutable=false",
+    "dist:all": "electron-builder --linux AppImage tar.gz --win portable -c.win.signAndEditExecutable=false"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "it.sqlprofiler.app",
+    "productName": "SQL Profiler",
+    "directories": { "output": "dist" },
+    "afterPack": "build/linux-no-sandbox.js",
+    "files": ["main.js", "preload.js", "icon.png", "package.json"],
+    "extraResources": [
+      { "from": "../sqlprofiler", "to": "sqlprofiler", "filter": ["**/*", "!**/__pycache__/**"] },
+      { "from": "../requirements.txt", "to": "requirements.txt" }
+    ],
+    "linux": {
+      "target": ["AppImage", "tar.gz"],
+      "icon": "icon.png",
+      "category": "Development",
+      "artifactName": "SQL-Profiler-${version}-linux-${arch}.${ext}"
+    },
+    "win": { "target": "portable", "icon": "icon.png" },
+    "portable": { "artifactName": "SQL-Profiler-${version}-portable.exe" }
+  }
+}

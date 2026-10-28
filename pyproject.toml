@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sql-profiler"
+version = "1.0.0"
+description = "Database proxy that captures, analyzes and groups the SQL executed by a target application, with a real-time dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["sqlglot>=25", "aiohttp>=3.9"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+sql-profiler = "sqlprofiler.__main__:main"
+
+[tool.setuptools]
+packages = ["sqlprofiler", "sqlprofiler.protocols"]
+
+[tool.setuptools.package-data]
+sqlprofiler = ["web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

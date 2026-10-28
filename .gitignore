@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# demo
+demo/.mysql/
+demo/scenario-report.md
+
+# desktop app
+electron/node_modules/
+electron/dist/
+
+# profiles (history and settings per application)
+profiles/
+demo/profiles/
