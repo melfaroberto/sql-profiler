@@ -108,8 +108,15 @@ A) APP DESKTOP (consigliata, come SQL FK Finder)
    Al primo avvio, se mancano le librerie Python, l'app chiede se installarle:
    rispondere "Install" (serve internet, solo la prima volta, circa un minuto).
 
+   Windows può mostrare un avviso SmartScreen perché l'exe non è firmato:
+   cliccare "Ulteriori informazioni" e poi "Esegui comunque".
+
    NOTA: la versione Windows è stata creata ma non ancora provata su Windows.
    Se dà problemi, usare il modo B.
+
+   NOTA: i file in electron/dist/ NON sono su GitHub. Se la cartella è stata
+   scaricata da GitHub, l'eseguibile va creato (vedi "Creare l'eseguibile per
+   Windows" più sotto) oppure si usa il modo B.
 
 B) DA RIGA DI COMANDO (funziona ovunque ci sia Python)
    ---------------------------------------------------
@@ -124,6 +131,51 @@ B) DA RIGA DI COMANDO (funziona ovunque ci sia Python)
        pip download -r requirements.txt -d wheels
      copiare la cartella "wheels" sul computer di lavoro, poi:
        pip install --no-index --find-links wheels -r requirements.txt
+
+CREARE L'ESEGUIBILE PER WINDOWS
+-------------------------------
+Serve solo se hai modificato il codice o se hai scaricato la cartella da
+GitHub. Serve Node.js (https://nodejs.org). Per usare l'exe serve comunque
+Python 3.10 o più recente sul computer.
+
+Il risultato è sempre electron/dist/SQL-Profiler-1.0.0-portable.exe.
+
+Da una COPIA COMPLETA della cartella:
+
+  Su Linux:
+       cd electron
+       npm install
+       npm run dist:win
+    L'exe funziona, ma ha i dettagli del file predefiniti di Electron.
+
+  Su Windows:
+    Cancellare prima electron/node_modules se è stata copiata da Linux, poi:
+       cd electron
+       npm install
+       npx electron-builder --win portable
+    In questo modo l'exe ha anche l'icona corretta. Se compare un errore tipo
+    "Cannot create symbolic link", attivare la Modalità sviluppatore di Windows
+    o aprire il terminale come amministratore.
+
+Da una copia scaricata da GITHUB (serve anche Git, https://git-scm.com):
+
+    1. Scaricare il progetto:
+         git clone https://github.com/melfaroberto/sql-profiler.git
+         cd sql-profiler/electron
+
+    2. Aprire package.json e cancellare questa riga, perché il file che indica
+       non è su GitHub:
+         "afterPack": "build/linux-no-sandbox.js",
+
+    3. Creare l'exe:
+         npm install
+         npm run dist:win
+
+    ATTENZIONE: non fare il commit di questa modifica. Senza quella riga, le
+    build Linux creano un'AppImage che su Ubuntu 24.04 e successive non si
+    avvia.
+
+    Procedura non ancora provata su una copia appena scaricata.
 
 
 --------------------------------------------------------------------------------
