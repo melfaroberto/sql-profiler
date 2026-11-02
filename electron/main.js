@@ -186,13 +186,13 @@ function createWindow() {
   mainWindow.loadURL(address);
 }
 
-// file / folder picker for the Settings dialog
+// file / folder picker for the Settings dialog and the Static analysis section
 ipcMain.handle("choose-path", async (event, kind) => {
   const folder = kind === "folder";
   const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: folder ? "Choose a folder" : "Choose a file",
     properties: [folder ? "openDirectory" : "openFile"],
-    filters: folder ? [] : [{ name: "Schema (sql-fk-finder model, SQL dump)", extensions: ["json", "sql"] },
+    filters: folder ? [] : kind === "csv" ? [{ name: "Log (.csv)", extensions: ["csv", "gz"] }, { name: "All files", extensions: ["*"] }] : [{ name: "Schema (sql-fk-finder model, SQL dump)", extensions: ["json", "sql"] },
                             { name: "All files", extensions: ["*"] }],
   });
   return r.canceled ? null : r.filePaths[0];

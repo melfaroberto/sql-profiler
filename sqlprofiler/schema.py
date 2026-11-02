@@ -6,6 +6,7 @@ Sources, in order of preference:
   * a folder of .sql dumps analysed by the sql-fk-finder package itself (--sqlfk-path), same result;
   * a folder of .sql dumps or a single .sql file read by the built-in DDL reader: declared FKs only.
 """
+import gzip
 import json
 import logging
 import re
@@ -27,6 +28,7 @@ class SchemaCatalog:
         self.tables = {}            # normalized name -> {"name", "columns": [...], "group", "area"}
         self.links = []             # {"from", "from_cols", "to", "to_cols", "kind"}
         self.source = source
+        self.problems = []          # what the loader could not read
         for t in tables or []:
             self.add_table(t)
         for l in links or []:
@@ -124,16 +126,30 @@ def from_sqlfk_package(folder, sqlfk_path, dialect="mysql"):
     return from_sqlfk_model(MR.struttura(R, gruppo_di, "collegamenti"), source=f"sql-fk-finder analysis of {folder}")
 
 
-_CREATE = re.compile(r"^\s*CREATE\s+(TEMPORARY\s+)?TABLE\b", re.I)
+_DDL = re.compile(r"^\s*(CREATE\s+(TEMPORARY\s+)?TABLE|ALTER\s+TABLE)\b", re.I)
+_ALTER_TABLE = re.compile(r"^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(?P<name>[`\"\w.$]+)", re.I)
+_ALTER_PK = re.compile(r"\bADD\s+(?:CONSTRAINT\s+[`\"\w$]*\s+)?PRIMARY\s+KEY\s*(?:USING\s+\w+\s*)?\((?P<cols>[^)]*)\)", re.I)
+_ALTER_FK = re.compile(r"\bFOREIGN\s+KEY\s*[`\"\w$]*\s*\((?P<cols>[^)]*)\)\s*REFERENCES\s+(?P<to>[`\"\w.$]+)\s*(?:\((?P<to_cols>[^)]*)\))?", re.I)
 
 
-def _create_statements(path):
-    """CREATE TABLE statements of a dump file, read line by line (dumps can be huge: data lines are skipped)."""
+def open_text(path):
+    """A text file for reading, whatever a server or Windows left it as: gzip compressed, UTF-16 with BOM, or broken bytes."""
+    path = Path(path)
+    if path.suffix.lower() == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    with open(path, "rb") as f:
+        utf16 = f.read(2) in (b"\xff\xfe", b"\xfe\xff")
+    return open(path, encoding="utf-16" if utf16 else "utf-8-sig", errors="replace")
+
+
+def _ddl_statements(path):
+    """CREATE TABLE and ALTER TABLE statements of a dump file, read line by line (dumps can be huge: data lines are
+    skipped). ALTER TABLE matters because some tools, like phpMyAdmin, export their keys that way."""
     block = None
-    with open(path, encoding="utf-8", errors="replace") as f:
+    with open_text(path) as f:
         for line in f:
             if block is None:
-                if not _CREATE.match(line):
+                if not _DDL.match(line):
                     continue
                 block = []
             block.append(line)
@@ -142,31 +158,95 @@ def _create_statements(path):
                 block = None
 
 
+def _without_table_options(ddl):
+    """CREATE TABLE ... (...) without what follows the closing parenthesis (ENGINE, PARTITION BY, ...)."""
+    depth, quote, i = 0, None, 0
+    while i < len(ddl):
+        ch = ddl[i]
+        if quote:
+            if ch == "\\" and quote != "`":
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return ddl[:i + 1]
+        i += 1
+    return ddl
+
+
+def _parse_create(ddl, dialect):
+    try:
+        tree = sqlglot.parse_one(ddl, read=dialect)
+        if isinstance(tree, exp.Create) and isinstance(tree.this, exp.Schema):
+            return tree                                  # options it does not know make it give up without an error
+    except (sqlglot.errors.ParseError, sqlglot.errors.TokenError):
+        pass
+    return sqlglot.parse_one(_without_table_options(ddl), read=dialect)
+
+
+def _apply_alter(ddl, by_name, links):
+    """The keys added by an ALTER TABLE statement, read with regular expressions: the rest of it does not matter."""
+    m = _ALTER_TABLE.match(ddl)
+    table = by_name.get(norm(m.group("name")).rsplit(".", 1)[-1]) if m else None
+    if not table:
+        return
+    split = lambda text: [norm(c.split("(")[0]) for c in text.split(",") if c.strip()]
+    for pk in _ALTER_PK.finditer(ddl):
+        wanted = set(split(pk.group("cols")))
+        for c in table["columns"]:
+            if norm(c["name"]) in wanted:
+                c["pk"] = True
+    for fk in _ALTER_FK.finditer(ddl):
+        links.append({"from": table["name"], "from_cols": split(fk.group("cols")),
+                      "to": norm(fk.group("to")).rsplit(".", 1)[-1], "to_cols": split(fk.group("to_cols") or ""),
+                      "kind": "declared", "relation": ""})
+
+
 def from_ddl(path, dialect="mysql"):
     """Built-in reader: columns, types, primary keys and declared foreign keys."""
     p = Path(path)
-    files = sorted(p.glob("*.sql")) if p.is_dir() else [p]
-    tables, links = [], []
+    return from_ddl_files(sorted(p.glob("*.sql")) if p.is_dir() else [p], dialect, f"DDL in {p}")
+
+
+def from_ddl_files(files, dialect="mysql", source=None):
+    """The same for a list of files. The statements that could not be read are in the catalog's .problems."""
+    tables, links, alters, problems = [], [], [], []
     for file in files:
-        for ddl in _create_statements(file):
+        for ddl in _ddl_statements(file):
+            if _ALTER_TABLE.match(ddl):
+                alters.append(ddl)
+                continue
             try:
-                tree = sqlglot.parse_one(ddl, read=dialect)
-            except sqlglot.errors.ParseError as e:
-                log.warning("schema: cannot parse a CREATE TABLE in %s: %s", file.name, str(e).splitlines()[0])
+                tree = _parse_create(ddl, dialect)
+            except (sqlglot.errors.ParseError, sqlglot.errors.TokenError) as e:
+                log.warning("schema: cannot parse a CREATE TABLE in %s: %s", Path(file).name, str(e).splitlines()[0])
+                problems.append(f"{Path(file).name}: cannot read “{' '.join(ddl.split())[:80]}…”")
                 continue
             t, l = _table_from_create(tree, dialect)
             if t:
                 tables.append(t)
                 links += l
+            else:
+                problems.append(f"{Path(file).name}: cannot read “{' '.join(ddl.split())[:80]}…”")
     by_name = {norm(t["name"]): t for t in tables}
+    for ddl in alters:
+        _apply_alter(ddl, by_name, links)
+    links = _dedupe(links)
     for l in links:
         src = by_name.get(norm(l["from"]))
         for c in src["columns"] if src else []:
             if norm(c["name"]) in {norm(x) for x in l["from_cols"]}:
                 c["fk"] = True
                 c["refs"] = sorted(set(c["refs"]) | {l["to"]})
-    cat = SchemaCatalog(tables, links, f"DDL in {p}")
-    log.info("schema: %d tables, %d declared foreign keys from %s", len(cat.tables), len(cat.links), p)
+    cat = SchemaCatalog(tables, links, source or "DDL in " + ", ".join(Path(f).name for f in files))
+    cat.problems = problems
+    log.info("schema: %d tables, %d declared foreign keys from %s", len(cat.tables), len(cat.links), cat.source)
     return cat
 
 

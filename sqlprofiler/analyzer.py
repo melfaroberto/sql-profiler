@@ -31,6 +31,7 @@ _NOISE = re.compile(
 # catalog introspection done by drivers (asyncpg type lookups, JDBC metadata, ...)
 _CATALOG = re.compile(r"\b(pg_catalog\.|pg_type\b|information_schema\.|current_setting\s*\(|set_config\s*\()", re.I)
 
+_STRINGS = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"", re.S)
 _FIRST_WORD = re.compile(r"^\s*(?:/\*.*?\*/\s*|--[^\n]*\n\s*|#[^\n]*\n\s*)*([A-Za-z]+)", re.S)
 
 
@@ -61,9 +62,9 @@ class QueryAnalyzer:
     # ------------------------------------------------------------------ main entry
 
     def _analyze(self, sql):
-        result = {"query_type": first_keyword(sql), "statements": 1, "tables": [], "columns": [], "joins": [],
+        result = {"query_type": first_keyword(sql), "statements": 1, "tables": [], "columns": [], "joins": [], "all_columns": [],
                   "formatted": sql, "fingerprint": _fallback_fingerprint(sql), "parse_error": None,
-                  "noise": bool(_NOISE.match(sql) or _CATALOG.search(sql))}
+                  "noise": bool(_NOISE.match(sql) or _CATALOG.search(_STRINGS.sub("''", sql)))}
         text, replace = sql, False
         if result["query_type"] == "REPLACE":            # sqlglot does not parse MySQL REPLACE INTO
             text, replace = re.sub(r"^\s*REPLACE", "INSERT", sql, count=1, flags=re.I), True
@@ -81,14 +82,15 @@ class QueryAnalyzer:
         result["query_type"] = types[0] if len(set(types)) == 1 else "MULTI"
         result["statements"] = len(trees)
 
-        tables, columns, joins = {}, {}, {}
+        tables, columns, joins, all_columns = {}, {}, {}, {}
         for tree, typ in zip(trees, types):
             if isinstance(tree, exp.Command):
                 continue
-            self._collect(tree, typ, tables, columns, joins)
+            self._collect(tree, typ, tables, columns, joins, all_columns)
         result["tables"] = list(tables.values())
         result["columns"] = list(columns.values())
         result["joins"] = list(joins.values())
+        result["all_columns"] = list(all_columns.values())
         if result["query_type"] in TX_TYPES:
             result["noise"] = False
         try:
@@ -102,7 +104,7 @@ class QueryAnalyzer:
 
     # ------------------------------------------------------------------ AST walk
 
-    def _collect(self, tree, typ, tables, columns, joins):
+    def _collect(self, tree, typ, tables, columns, joins, all_columns):
         cte_names = {norm(c.alias) for c in tree.find_all(exp.CTE)}
         aliases = {}                                     # alias or name -> canonical table name
         written = self._write_targets(tree, typ)
@@ -166,6 +168,20 @@ class QueryAnalyzer:
             usage = "write" if id(col) in set_columns else (
                 "filter" if col.find_ancestor(exp.Where, exp.Join, exp.Having) else "read")
             add_column(table, col.name, usage)
+
+        # SELECT *, SELECT t.* and INSERT without a column list use every column of the table
+        def add_all(table, usage):
+            if table:
+                all_columns[(norm(table), usage)] = {"table": table, "usage": usage}
+
+        for star in tree.find_all(exp.Star):
+            if isinstance(star.parent, exp.Column):
+                add_all(aliases.get(norm(star.parent.table)), "read")
+            elif isinstance(star.parent, exp.Select):
+                for table in in_scope.get(id(star.parent), []):
+                    add_all(table, "read")
+        if isinstance(tree, exp.Insert) and isinstance(tree.this, exp.Table):
+            add_all(aliases.get(norm(tree.this.name)), "write")
 
         # equality predicates between columns of two different tables: joins observed at runtime
         for eq in tree.find_all(exp.EQ):

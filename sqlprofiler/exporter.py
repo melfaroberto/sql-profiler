@@ -372,7 +372,7 @@ table.list th { color: var(--muted); } td.num { text-align: right; }
 .er-table rect.used { fill: var(--primary-soft); } .er-table rect.used.write { fill: var(--danger-soft); }
 .er-table text.used { font-weight: 700; }
 .er-link { fill: none; stroke-width: 1.6; } .er-link.declared { stroke: var(--primary); }
-.er-link.inferred { stroke: var(--ok); stroke-dasharray: 5 3; } .er-link.observed { stroke: var(--warn); stroke-dasharray: 2 3; stroke-width: 2; }
+.er-link.inferred { stroke: var(--ok); stroke-dasharray: 5 3; } .er-link.possible { stroke: #8e24aa; stroke-dasharray: 8 4 2 4; } .er-link.observed { stroke: var(--warn); stroke-dasharray: 2 3; stroke-width: 2; }
 @media print { .tools { display: none; } .er-box { height: auto; min-height: 0; border: 0; } }
 """
 

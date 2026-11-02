@@ -26,6 +26,8 @@ npm start
 
 ## Build the executables
 
+The easy way: `./crea_eseguibili.sh` (Linux) or `crea_eseguibili.bat` (Windows), in the project folder. By hand:
+
 ```bash
 npm run dist         # Linux: dist/SQL-Profiler-1.0.0-linux-x86_64.AppImage and -linux-x64.tar.gz
 npm run dist:win     # Windows: dist/SQL-Profiler-1.0.0-portable.exe

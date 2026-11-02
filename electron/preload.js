@@ -2,5 +2,5 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("sqlprofilerApp", {
-  choosePath: kind => ipcRenderer.invoke("choose-path", kind),     // kind: "file" | "folder"
+  choosePath: kind => ipcRenderer.invoke("choose-path", kind),     // kind: "file" | "csv" | "folder"
 });

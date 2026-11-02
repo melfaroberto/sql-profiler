@@ -389,8 +389,8 @@ async function loadSessions() {
 function renderSessions() {
   const counts = state.status ? state.status.counts : null;
   const items = [
-    `<li class="special ${state.view === "all" ? "active" : ""}" data-view="all"><span class="name">⚡ Live — all queries</span><span class="n">${counts ? counts.total : ""}</span></li>`,
-    `<li class="special ${state.view === "none" ? "active" : ""}" data-view="none"><span class="name">○ Outside sessions</span><span class="n">${counts ? counts.unassigned : ""}</span></li>`,
+    `<li class="special ${state.view === "all" ? "active" : ""}" data-view="all"><span class="name">All queries, live</span><span class="n">${counts ? counts.total : ""}</span></li>`,
+    `<li class="special ${state.view === "none" ? "active" : ""}" data-view="none"><span class="name">Outside sessions</span><span class="n">${counts ? counts.unassigned : ""}</span></li>`,
     `<li class="sep"></li>`,
   ];
   const item = (s, depth) => {
@@ -906,6 +906,205 @@ function renderSql() {
   $("sql-text").innerHTML = SqlHL.highlight(sqlText(q, mode));
 }
 
+// ====================================================================== sections: live session / static analysis
+
+function setMode(mode, remember = true) {
+  document.body.classList.toggle("mode-static", mode === "static");
+  $("static-view").hidden = mode !== "static";
+  document.querySelectorAll("#mode-menu button").forEach(b => b.classList.toggle("on", b.dataset.modeTo === mode));
+  if (remember) try { localStorage.setItem("sql-profiler-mode", mode); } catch { /* only a convenience */ }
+  if (mode === "static" && staticState.result) drawStaticDiagram();      // a hidden box has no size to fit into
+}
+
+// ====================================================================== static analysis
+
+const staticState = { result: null, view: null, running: false };
+const OP_LABELS = { select: "SELECT", insert: "INSERT", update: "UPDATE", delete: "DELETE" };
+
+function staticPaths(write) {
+  try {               // only a convenience: the page works the same when the browser refuses it
+    if (write) localStorage.setItem("static-paths", JSON.stringify({ dump: $("static-dump").value, log: $("static-log").value }));
+    else {
+      const saved = JSON.parse(localStorage.getItem("static-paths") || "{}");
+      $("static-dump").value = saved.dump || "";
+      $("static-log").value = saved.log || "";
+    }
+  } catch { /* not available */ }
+}
+
+async function runStatic(e) {
+  e.preventDefault();
+  if (staticState.running) return;
+  staticState.running = true;
+  staticPaths(true);
+  $("static-run").disabled = true;
+  $("static-status").textContent = "Reading the dump and the log… a big log can take a few minutes.";
+  $("static-error").hidden = true;
+  try {
+    staticState.result = await api("/api/static", { method: "POST",
+      body: { dump: $("static-dump").value.trim(), log: $("static-log").value.trim() } });
+    renderStatic();
+  } catch (err) {
+    staticState.result = null;
+    $("static-result").hidden = true;
+    $("static-empty").hidden = false;
+    $("static-error").textContent = err.message;
+    $("static-error").hidden = false;
+  } finally {
+    staticState.running = false;
+    $("static-run").disabled = false;
+    $("static-status").textContent = "";
+  }
+}
+
+function renderStatic() {
+  const r = staticState.result, s = r.summary;
+  $("static-result").hidden = false;
+  $("static-empty").hidden = true;
+  $("static-stats").innerHTML = [
+    [s.tables, `tables used (dump: ${s.dump_tables})`], [s.counts.select, "in SELECT"], [s.counts.insert, "in INSERT"],
+    [s.counts.update, "in UPDATE"], [s.counts.delete, "in DELETE"], [s.statements, "statements"],
+  ].map(([n, label]) => `<div><b>${n}</b><span>${esc(label)}</span></div>`).join("");
+  const ignored = Object.entries({ ...s.ignored, ...s.other_types }).map(([k, n]) => `${k} ${n}`).join(", ");
+  $("static-facts").innerHTML = [
+    `<span>${esc(r.log)}: <b>${s.rows}</b> rows</span>`,
+    s.first ? `<span>from <b>${esc(s.first)}</b> to <b>${esc(s.last)}</b></span>` : "",
+    `<span>${s.dump_files} .sql files</span>`,
+    ignored ? `<span title="Rows that are not SELECT, INSERT, UPDATE or DELETE statements">not counted: ${esc(ignored)}</span>` : "",
+  ].join("");
+  $("static-problems").textContent = r.problems.join("\n");
+  $("static-problems").hidden = !r.problems.length;
+  renderStaticGroups();
+  $("static-unused-title").textContent = `Tables of the dump never used by the log (${r.unused.length})`;
+  $("static-unused").innerHTML = r.unused.map(n => `<li>${esc(n)}</li>`).join("");
+  $("static-unused-box").hidden = !r.unused.length;
+  drawStaticDiagram();
+}
+
+// a table of the log as a box of the diagram; every column is there, the ones the log uses highlighted
+const VALUE_WIDTH = 30;
+
+// what the box shows of the values written to an attribute: the last one, and how many others there are
+function valueLabel(c) {
+  if (c.value === undefined) return {};
+  const others = c.values.length - 1;
+  const text = c.value.length > VALUE_WIDTH ? c.value.slice(0, VALUE_WIDTH - 1) + "…" : c.value;
+  const lines = c.values.map(([v, n]) => `${v}${n > 1 ? `   (${n}×)` : ""}`);
+  return { valueText: text + (others > 0 ? ` (+${others}${c.more_values ? "+" : ""})` : ""),
+           valueTip: `${c.name}: ${others > 0 ? "last value " + c.value + "\n\nAll the values:\n" : ""}${lines.join("\n")}${
+             c.value === "NULL" && c.usage.length === 0 ? "\n\nNot in the statement: NULL, unless the column has a default or is auto-increment." : ""}` };
+}
+
+function staticBox(t) {
+  return { name: t.table, known: t.in_dump, access: "", mute: true, badge: `${t.queries}×`,
+           note: t.partial ? `⚠ ${t.partial} unread: attributes may be missing` : "",
+           columns: t.columns.map(c => ({ ...c, ...valueLabel(c), type: c.in_dump || !t.in_dump ? c.type : "not in dump", used: c.usage, refs: [] })) };
+}
+
+const OP_COLORS = { select: "#1f66b5", insert: "#1f7a3d", update: "#b85a00", delete: "#b5281c" };
+const shownOps = r => Object.keys(OP_LABELS).filter(op => op !== "delete" || r.groups.delete.length);
+
+function renderStaticGroups() {
+  const r = staticState.result, f = $("static-filter").value.trim().toLowerCase();
+  const matches = t => !f || t.table.toLowerCase().includes(f) || t.columns.some(c => c.name.toLowerCase().includes(f));
+  const box = $("static-groups");
+  box.innerHTML = "";
+  for (const op of shownOps(r)) {
+    const tables = r.groups[op].filter(matches);
+    const section = document.createElement("section");
+    section.className = `op-col ${op}`;
+    section.innerHTML = `<h3>${OP_LABELS[op]}<span class="muted">${tables.length} table${tables.length === 1 ? "" : "s"}</span></h3>`;
+    const list = document.createElement("div");
+    list.className = "op-boxes";
+    if (!tables.length) list.innerHTML = `<p class="none">${f ? "No match." : "No table."}</p>`;
+    for (const t of tables) {
+      const item = document.createElement("div");
+      item.className = "op-box";
+      item.append(MiniER.tableBox(staticBox(t)));
+      const facts = t.columns.length ? `${t.used} of ${t.columns.length} attributes used` : "attributes not known";
+      item.insertAdjacentHTML("beforeend", `<div class="op-facts">${facts} · ${t.queries} quer${t.queries === 1 ? "y" : "ies"}</div>
+        <details><summary>Example statements</summary>${t.examples.map(x =>
+          `<pre>${x.count > 1 ? `[${x.count}×] ` : ""}${esc(x.sql)}</pre>`).join("")}</details>`);
+      list.append(item);
+    }
+    section.append(list);
+    box.append(section);
+  }
+}
+
+function saveStaticTables() {
+  const r = staticState.result, s = r.summary;
+  const image = MiniER.tablesToSvg(
+    shownOps(r).map(op => ({ label: OP_LABELS[op], color: OP_COLORS[op], tables: r.groups[op].map(staticBox) })),
+    { title: `Tables used in ${r.log}`, subtitle: `${s.tables} tables · ${s.statements} statements${s.first ? ` · from ${s.first} to ${s.last}` : ""}` });
+  saveBlob(new Blob([image.svg], { type: "image/svg+xml" }), staticName("svg").replace(/\.svg$/, "-tables.svg"));
+}
+
+function drawStaticDiagram() {
+  if (!$("static-view").hidden && staticState.result) {
+    staticState.view = MiniER.render($("static-canvas"), staticState.result.er, { graph: true });
+  }
+}
+
+function staticImage() {
+  const r = staticState.result, s = r.summary;
+  return MiniER.toSvg(r.er, { title: `Tables used in ${r.log}`,
+    subtitle: `${s.tables} tables · SELECT ${s.counts.select} · INSERT ${s.counts.insert} · UPDATE ${s.counts.update} · DELETE ${s.counts.delete} · ${s.statements} statements` });
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+const staticName = ext => `static-${staticState.result.log.replace(/\.[^.]*$/, "").replace(/[^\w.-]+/g, "-") || "log"}.${ext}`;
+
+async function saveStaticImage(ext) {
+  try {
+    const image = staticImage();
+    saveBlob(ext === "svg" ? new Blob([image.svg], { type: "image/svg+xml" }) : await MiniER.toPng(image), staticName(ext));
+  } catch (err) {
+    $("static-error").textContent = err.message;
+    $("static-error").hidden = false;
+  }
+}
+
+function saveStaticCsv() {
+  const cell = v => `"${String(v).replace(/"/g, '""')}"`;
+  const lines = [["operation", "table", "table_in_dump", "table_queries", "attribute", "type", "key", "used", "usage", "attribute_in_dump", "last_value", "all_values"].join(",")];
+  for (const [op, tables] of Object.entries(staticState.result.groups)) {
+    for (const t of tables) {
+      for (const c of t.columns.length ? t.columns : [{ name: "", type: "", usage: [], in_dump: t.in_dump }]) {
+        lines.push([OP_LABELS[op], t.table, t.in_dump ? "yes" : "no", t.queries, c.name, c.type,
+          [c.pk ? "PK" : "", c.fk ? "FK" : ""].filter(Boolean).join(" "), c.usage.length ? "yes" : "no",
+          c.usage.join("/"), c.in_dump ? "yes" : "no", c.value === undefined ? "" : c.value,
+          (c.values || []).map(([v]) => v).join(" | ")].map(cell).join(","));
+      }
+    }
+  }
+  saveBlob(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv" }), staticName("csv"));     // BOM: for Excel
+}
+
+function bindStatic() {
+  $("mode-menu").addEventListener("click", e => { const b = e.target.closest("[data-mode-to]"); if (b) setMode(b.dataset.modeTo); });
+  $("static-form").addEventListener("submit", runStatic);
+  $("static-filter").addEventListener("input", renderStaticGroups);
+  $("static-fit").onclick = () => { if (staticState.view) staticState.view.reset(); };
+  $("static-png").onclick = () => saveStaticImage("png");
+  $("static-svg").onclick = () => saveStaticImage("svg");
+  $("static-csv").onclick = saveStaticCsv;
+  $("static-tables-svg").onclick = saveStaticTables;
+  staticPaths(false);
+  let saved = "live";
+  try { saved = localStorage.getItem("sql-profiler-mode") || "live"; } catch { /* only a convenience */ }
+  setMode(saved, false);
+}
+
 // ====================================================================== WebSocket
 
 let ws = null, wsDelay = 500;
@@ -1153,6 +1352,7 @@ function bind() {
 }
 
 bind();
+bindStatic();
 loadProfiles();
 loadTableNames();
 loadProfileTables();

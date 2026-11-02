@@ -1,0 +1,134 @@
+================================================================================
+                    SQL PROFILER - ANALISI STATICA
+================================================================================
+
+A COSA SERVE
+------------
+Fare reverse engineering di un'applicazione partendo solo da due cose:
+  - il dump del suo database;
+  - il log delle query che ha eseguito.
+
+La sezione mostra quali tabelle usa l'applicazione, divise per operazione, e quali
+attributi (colonne) tocca. Lavora solo sui file: non serve il proxy, non si collega
+a nessun database e non scrive nulla nelle sessioni o nella cronologia.
+
+
+COME SI USA
+-----------
+  1. Nel menu in alto scegliere "Static analysis" (al posto di "Live session").
+  2. "Dump folder": la cartella con i file .sql del dump ("Folder…").
+  3. "Log": il file .csv ("File…").
+  4. Premere "Analyse".
+
+La sessione live non viene interrotta: se una registrazione è in corso continua, e
+si torna a vederla con "Live session". Nella versione da browser, senza app desktop,
+i percorsi vanno scritti a mano.
+
+
+I FILE IN INGRESSO
+------------------
+Cartella del dump
+  Tutti i file .sql (anche .sql.gz), comprese le sottocartelle. Servono i CREATE TABLE;
+  i dati vengono saltati, quindi anche dump enormi si leggono in fretta. Le chiavi
+  vengono lette anche dagli ALTER TABLE (come esporta phpMyAdmin).
+
+Log .csv
+  La prima riga deve contenere i nomi delle colonne: event_time, command_type, query.
+  (Anche i nomi event_type e argument vanno bene.) L'ordine non conta, maiuscole e
+  minuscole nemmeno, e le altre colonne vengono ignorate. L'unica indispensabile è
+  quella con la query: senza command_type si analizzano tutte le righe. Va bene il separatore , oppure
+  ; (Excel italiano), tabulazione o |. Le query possono stare su più righe.
+
+  Esempio:
+    event_time,command_type,query
+    2026-10-26 09:12:01,Query,"SELECT nome, citta FROM clienti WHERE id = 5"
+    2026-10-26 09:12:02,Query,"UPDATE ordini SET stato = 'A' WHERE id = 7"
+
+  command_type serve a scartare le righe che non sono istruzioni: Connect, Quit, Init DB,
+  Prepare (è seguita da Execute, che ha i valori) e simili. Tutti gli altri tipi
+  vengono analizzati, e l'operazione si ricava sempre dal testo della query.
+
+
+COSA MOSTRA
+-----------
+In alto: numero di tabelle usate, righe del log, periodo coperto e cosa non è stato
+contato (ad esempio Connect o CREATE). Nel riquadro azzurro gli avvisi.
+
+Sezioni SELECT / INSERT / UPDATE (e DELETE, se il log ne contiene)
+  Ogni sezione mostra le tabelle usate con quell'operazione, dalla più usata, nello stesso
+  formato del diagramma. La stessa tabella compare in più sezioni se viene sia letta sia
+  scritta. Nell'intestazione, il numero di volte in cui è stata usata (es. 12×).
+
+  Ogni tabella elenca tutti i suoi attributi, con quelli usati evidenziati:
+    azzurro    letto (nella SELECT)
+    arancione  usato solo come filtro (WHERE, JOIN, HAVING)
+    rosso      scritto (INSERT, UPDATE)
+    grigio     il log non lo usa con questa operazione
+    intestazione grigia: tabella che non esiste nel dump
+    PK / FK    chiave primaria / chiave esterna
+  Passando col mouse su un attributo si vedono il tipo e gli usi. "Example statements"
+  mostra fino a 5 query diverse, ciascuna col numero di esecuzioni.
+
+  Valori scritti (sezioni INSERT e UPDATE)
+    Accanto a ogni attributo c'è il valore scritto, così come appare nella query:
+      'Rossi'      una stringa            NOW()        una funzione
+      42           un numero              stock - 1    un calcolo
+      NULL         nessun valore
+    INSERT: un attributo non nominato nella query appare come NULL (e resta grigio).
+      Attenzione: nel database può finire invece il suo valore predefinito o
+      l'auto-increment, che il log non mostra.
+      "(from SELECT)" vuol dire che i valori vengono da una query.
+    UPDATE: il valore compare solo per gli attributi aggiornati; gli altri restano vuoti.
+    Con più esecuzioni si vede l'ultimo valore, con il numero degli altri: 'abc' (+3).
+    Passando col mouse sul valore si vedono tutti, con quante volte è stato usato ciascuno.
+    Una query troncata dal log mostra … alla fine del valore; dopo il taglio non si
+    inventano valori. Si conservano 20 valori diversi per attributo e 120 caratteri per
+    valore; si leggono le prime 200 esecuzioni di ogni query e 200 righe per ogni INSERT.
+
+  "Save tables (.svg)" salva tutte le tabelle, divise per operazione, in un'immagine SVG.
+
+  Se una tabella riporta "⚠ N unread: attributes may be missing", N esecuzioni non si sono
+  potute leggere del tutto: i suoi attributi grigi potrebbero essere usati lo stesso.
+  L'app mostra anche alcuni esempi di quelle query. In quel caso conviene controllarle.
+
+Diagramma
+  Le tabelle usate e i loro collegamenti, salvabile come immagine (.png o .svg).
+    blu continua          chiave esterna dichiarata nel dump
+    verde tratteggiata    dedotta dai nomi, affidabilità alta
+    viola tratto-punto    possibile, affidabilità media (id_cliente -> clienti): DA CONTROLLARE
+    arancione a puntini   JOIN presente nel log ma non nel dump
+  Le regole di deduzione sono quelle di SQL FK Finder, rese più prudenti: i nomi generici
+  (codice, nome, ...) non creano collegamenti e i tipi devono essere compatibili.
+
+In fondo: le tabelle del dump che il log non usa mai.
+"Results (.csv)" salva tutto in un file apribile con Excel, una riga per ogni
+operazione, tabella e attributo.
+
+
+COME VENGONO CLASSIFICATE LE QUERY
+----------------------------------
+  - INSERT e REPLACE vanno in INSERT; UPDATE in UPDATE; DELETE e TRUNCATE in DELETE.
+  - Le tabelle lette dentro una scrittura vanno in SELECT:
+      INSERT INTO a SELECT x FROM b     -> a in INSERT, b in SELECT
+      UPDATE a JOIN b ... SET a.x = 1   -> a in UPDATE, b in SELECT
+  - SELECT * e INSERT senza elenco di colonne contano come uso di TUTTI gli attributi
+    (COUNT(*) invece non ne usa nessuno).
+  - Una WHERE dentro UPDATE o DELETE è elencata sotto quell'operazione, come filtro.
+  - Non vengono contate: query dei driver (SET, SHOW, SELECT @@...), transazioni, CREATE,
+    ALTER, DROP e le tabelle di sistema (mysql, information_schema, performance_schema, sys).
+
+
+LIMITI
+------
+  - Le tabelle usate dentro le stored procedure non si vedono dal log: l'app avvisa
+    quali procedure vengono chiamate (CALL). Lo stesso vale per trigger e viste.
+  - Se una query non si riesce ad analizzare (ad esempio è troncata dal log) si riprova
+    senza i valori; per una INSERT basta l'inizio della query, quindi gli attributi
+    restano corretti. Per le altre query la tabella compare con l'avviso descritto sopra.
+  - Una colonna senza prefisso in una query con più tabelle viene assegnata solo se dal
+    dump si capisce di quale tabella è; le altre sono elencate negli avvisi.
+  - Le colonne di una stessa tabella si sommano su tutto il log: non si vede quale tasto
+    dell'applicazione le ha usate. Per quello serve la sessione live.
+  - Tabelle con lo stesso nome in database diversi vengono considerate una sola.
+  - Il risultato non viene salvato: si perde chiudendo l'app, ma i percorsi restano
+    e basta premere di nuovo "Analyse".

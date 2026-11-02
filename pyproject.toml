@@ -20,7 +20,7 @@ sql-profiler = "sqlprofiler.__main__:main"
 packages = ["sqlprofiler", "sqlprofiler.protocols"]
 
 [tool.setuptools.package-data]
-sqlprofiler = ["web/*"]
+sqlprofiler = ["web/*", "web/vendor/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

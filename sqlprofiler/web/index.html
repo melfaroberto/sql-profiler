@@ -8,9 +8,13 @@
 </head>
 <body>
   <header class="top">
-    <h1><span class="logo">⇄</span> SQL Profiler</h1>
+    <h1><span class="logo" aria-hidden="true">⇄</span> SQL Profiler</h1>
     <select id="profile-select" class="profile-select" hidden
             title="Profile: one per application you profile, each with its own sessions, queries and settings"></select>
+    <div class="seg mode-seg" id="mode-menu" role="tablist" aria-label="Section">
+      <button type="button" data-mode-to="live" class="on" title="Capture the queries of a running application">Live session</button>
+      <button type="button" data-mode-to="static" title="Analyse a dump folder and a .csv log, without any connection">Static analysis</button>
+    </div>
     <div id="proxies" class="chips"></div>
     <div class="spacer"></div>
     <div id="schema-chip" class="chip muted" title="Static schema used to cross-reference tables">no schema</div>
@@ -131,6 +135,56 @@
     </section>
   </main>
 
+  <section id="static-view" class="static" hidden>
+    <form id="static-form" class="static-form static-card">
+      <div class="static-field">
+        <label for="static-dump"><span class="step">1</span>Dump folder <span class="muted">the .sql files of the database</span></label>
+        <div class="path-row">
+          <input id="static-dump" type="text" spellcheck="false" placeholder="/path/to/Dump20261015-1">
+          <button class="small desktop-only" type="button" data-pick="static-dump" data-kind="folder">Folder…</button>
+        </div>
+      </div>
+      <div class="static-field">
+        <label for="static-log"><span class="step">2</span>Log <span class="muted">.csv with event_time, command_type, query</span></label>
+        <div class="path-row">
+          <input id="static-log" type="text" spellcheck="false" placeholder="/path/to/log.csv">
+          <button class="small desktop-only" type="button" data-pick="static-log" data-kind="csv">File…</button>
+        </div>
+      </div>
+      <button id="static-run" class="primary" type="submit">Analyse</button>
+    </form>
+    <div id="static-status" class="muted static-status"></div>
+    <div id="static-error" class="error-box" hidden></div>
+    <div id="static-empty" class="static-empty"><b>What does the application do with its database?</b>
+      Give the dump and the log: you get the tables it uses for SELECT, INSERT and UPDATE, the attributes it touches and a
+      diagram of how the tables are connected. It works on the files alone, without any connection.</div>
+    <div id="static-result" hidden>
+      <div id="static-stats" class="stats"></div>
+      <div id="static-facts" class="facts"></div>
+      <div id="static-problems" class="note-box static-notes" hidden></div>
+      <div class="static-tools">
+        <input id="static-filter" type="search" placeholder="Filter tables or attributes…">
+        <span class="op-legend"><span><i class="read"></i>read</span><span><i class="filter"></i>filter (WHERE / JOIN)</span>
+          <span><i class="write"></i>written</span><span class="off">grey: not used by the log</span></span>
+        <div class="spacer"></div>
+        <button id="static-tables-svg" class="small primary" type="button" title="All the tables below, section by section, as an image">⬇ Save tables (.svg)</button>
+        <button id="static-csv" class="small" type="button">⬇ Results (.csv)</button>
+      </div>
+      <div id="static-groups" class="static-groups"></div>
+      <h3>Diagram of the tables used and their links</h3>
+      <div class="static-er"><div class="er-box"><div id="static-canvas" style="height:100%"></div>
+        <div class="er-tools"><button class="small" type="button" id="static-fit">Fit</button>
+          <button class="small" type="button" id="static-png">⬇ .png</button>
+          <button class="small" type="button" id="static-svg">⬇ .svg</button></div></div>
+      <div class="er-legend"><span><i style="border-color:var(--primary)"></i>declared FK</span>
+        <span><i style="border-color:var(--ok);border-top-style:dashed"></i>inferred from the names</span>
+        <span><i style="border-color:var(--possible);border-top-style:dashed"></i>possible: to check</span>
+        <span><i style="border-color:var(--warn);border-top-style:dotted"></i>join in the log, not in the dump</span>
+        <span>wheel = zoom · drag = move</span></div></div>
+      <details id="static-unused-box"><summary id="static-unused-title"></summary><ul id="static-unused" class="unused-list"></ul></details>
+    </div>
+  </section>
+
   <dialog id="settings-dlg" class="dlg">
     <form id="settings-form" method="dialog">
       <h2>Settings</h2>
@@ -184,6 +238,7 @@
     </form>
   </dialog>
 
+  <script src="/static/vendor/dagre.min.js"></script>
   <script src="/static/sqlhl.js"></script>
   <script src="/static/er.js"></script>
   <script src="/static/app.js"></script>

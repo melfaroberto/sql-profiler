@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-from . import exporter
+from . import exporter, staticmap
 
 log = logging.getLogger("sqlprofiler.server")
 WEB = Path(__file__).parent / "web"
@@ -242,6 +242,21 @@ def build_app(profiler):
         name = f"diagram-session-{session}" if session else "diagram-" + _safe_name(profiler.profile or "profile")
         return web.Response(text=text, content_type="text/html", charset="utf-8",
                             headers={"Content-Disposition": f'attachment; filename="{name}.html"'})
+
+    # ------------------------------------------------------------------ static analysis
+
+    @routes.post("/api/static")
+    async def static_analysis(request):
+        """{dump: folder of .sql files, log: .csv file}: tables and attributes used, by operation. Nothing is stored."""
+        body = await _body(request)
+        try:
+            return _json(await asyncio.get_running_loop().run_in_executor(
+                None, staticmap.analyse, body.get("dump"), body.get("log")))
+        except (ValueError, OSError) as e:
+            return _json({"error": str(e)}, 400)
+        except Exception as e:                       # a bad file must not end with a bare "Internal Server Error"
+            log.exception("static analysis failed")
+            return _json({"error": f"The files could not be analysed: {e}"}, 500)
 
     # ------------------------------------------------------------------ export
 

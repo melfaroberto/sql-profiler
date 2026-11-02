@@ -19,6 +19,7 @@ INDICE
  13. Provarlo senza il programma vero (la demo Mini Shop)
  14. Attenzione: sicurezza e buone pratiche
  15. Riepilogo veloce
+ 16. Analisi statica (dump + log CSV)
 
 
 --------------------------------------------------------------------------------
@@ -115,8 +116,8 @@ A) APP DESKTOP (consigliata, come SQL FK Finder)
    Se dà problemi, usare il modo B.
 
    NOTA: i file in electron/dist/ NON sono su GitHub. Se la cartella è stata
-   scaricata da GitHub, l'eseguibile va creato (vedi "Creare l'eseguibile per
-   Windows" più sotto) oppure si usa il modo B.
+   scaricata da GitHub, l'eseguibile va creato (vedi "Creare gli eseguibili"
+   più sotto) oppure si usa il modo B.
 
 B) DA RIGA DI COMANDO (funziona ovunque ci sia Python)
    ---------------------------------------------------
@@ -132,50 +133,25 @@ B) DA RIGA DI COMANDO (funziona ovunque ci sia Python)
      copiare la cartella "wheels" sul computer di lavoro, poi:
        pip install --no-index --find-links wheels -r requirements.txt
 
-CREARE L'ESEGUIBILE PER WINDOWS
--------------------------------
-Serve solo se hai modificato il codice o se hai scaricato la cartella da
-GitHub. Serve Node.js (https://nodejs.org). Per usare l'exe serve comunque
-Python 3.10 o più recente sul computer.
-
-Il risultato è sempre electron/dist/SQL-Profiler-1.0.0-portable.exe.
-
-Da una COPIA COMPLETA della cartella:
+CREARE GLI ESEGUIBILI
+---------------------
+Serve solo se hai modificato il codice o se hai scaricato la cartella da GitHub.
+Serve Node.js (https://nodejs.org) e, la prima volta, internet.
 
   Su Linux:
-       cd electron
-       npm install
-       npm run dist:win
-    L'exe funziona, ma ha i dettagli del file predefiniti di Electron.
+       ./crea_eseguibili.sh              Linux e Windows
+       ./crea_eseguibili.sh linux        solo Linux
+       ./crea_eseguibili.sh windows      solo Windows
 
-  Su Windows:
-    Cancellare prima electron/node_modules se è stata copiata da Linux, poi:
-       cd electron
-       npm install
-       npx electron-builder --win portable
-    In questo modo l'exe ha anche l'icona corretta. Se compare un errore tipo
-    "Cannot create symbolic link", attivare la Modalità sviluppatore di Windows
-    o aprire il terminale come amministratore.
+  Su Windows: doppio clic su crea_eseguibili.bat
+    (crea l'exe con l'icona corretta). Se compare un errore tipo "Cannot create
+    symbolic link", attivare la Modalità sviluppatore di Windows o avviarlo come
+    amministratore.
 
-Da una copia scaricata da GITHUB (serve anche Git, https://git-scm.com):
-
-    1. Scaricare il progetto:
-         git clone https://github.com/melfaroberto/sql-profiler.git
-         cd sql-profiler/electron
-
-    2. Aprire package.json e cancellare questa riga, perché il file che indica
-       non è su GitHub:
-         "afterPack": "build/linux-no-sandbox.js",
-
-    3. Creare l'exe:
-         npm install
-         npm run dist:win
-
-    ATTENZIONE: non fare il commit di questa modifica. Senza quella riga, le
-    build Linux creano un'AppImage che su Ubuntu 24.04 e successive non si
-    avvia.
-
-    Procedura non ancora provata su una copia appena scaricata.
+Il risultato finisce nella cartella "SQL Profiler - eseguibili" sul Desktop (e in
+electron/dist/). Per usare l'app serve comunque Python 3.10 o più recente.
+La versione Windows creata da Linux funziona, ma ha i dettagli del file predefiniti
+di Electron.
 
 
 --------------------------------------------------------------------------------
@@ -677,3 +653,12 @@ J) FERMARE
   7. Rimetti le impostazioni originali del programma.
 
 ================================================================================
+
+
+--------------------------------------------------------------------------------
+16. ANALISI STATICA (DUMP + LOG CSV)
+--------------------------------------------------------------------------------
+
+Nel menu in alto, "Static analysis" al posto di "Live session": analizza la cartella
+del dump e un log .csv, senza collegarsi a nessun database.
+La spiegazione completa è nel file ANALISI_STATICA.txt.

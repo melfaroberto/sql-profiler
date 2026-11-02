@@ -19,6 +19,13 @@ The target software is not modified: you only change **where it connects**.
 Supported databases: **MySQL / MariaDB** and **PostgreSQL**.
 The full specification is in [SPECIFICATION.md](SPECIFICATION.md).
 
+## Static analysis
+
+The **Static analysis** section (menu at the top, next to *Live session*) takes a folder of `.sql` files (the database
+dump) and a `.csv` log with the columns `event_time`, `command_type`, `query`, and shows the tables used divided by
+SELECT, INSERT, UPDATE and DELETE, with the attributes used highlighted, plus a diagram of their links. It works on the
+files alone: no proxy, no database connection, nothing stored. See `ANALISI_STATICA.txt`.
+
 ## Desktop app
 
 Like sql-fk-finder, the profiler also comes as a desktop application (Electron) — see
