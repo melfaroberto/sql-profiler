@@ -26,7 +26,8 @@ _COLUMNS = {"time": ("event_time", "time", "timestamp"), "type": ("command_type"
             "query": ("query", "argument", "sql_text", "sql")}
 _MAX_FIELD = 2 ** 31 - 1                                 # sys.maxsize does not fit a C long on Windows
 _MAX_PARSED_LENGTH = 200_000                             # longer statements are nearly always bulk INSERTs
-_MAX_EXAMPLES = 5
+_MAX_EXAMPLES = 20                                       # different statements kept for each table
+_MAX_EXAMPLE_LENGTH = 2000                               # characters kept of each of them
 
 _STRINGS_AND_COMMENTS = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"|/\*.*?\*/|--[^\n]*|#[^\n]*", re.S)
 _NAME = r"((?:`[^`]+`|[\w$]+)(?:\s*\.\s*(?:`[^`]+`|[\w$]+))?)"
@@ -136,7 +137,7 @@ def _rebuilt_head(text, keyword):
 
 
 def _empty_use():
-    return {"tables": {}, "joins": [], "partial": False, "kind": None, "unresolved": set()}
+    return {"tables": {}, "joins": [], "partial": False, "kind": None, "unresolved": {}}
 
 
 def _touch(use, op, table):
@@ -172,7 +173,7 @@ def _from_analysis(result):
 
     for c in result["columns"]:
         if not c["table"]:
-            use["unresolved"].add(c["column"])
+            use["unresolved"].setdefault(c["column"], set()).update(ops_of)     # the tables of its statement
             continue
         if norm(c["table"]) in excluded:
             continue
@@ -217,12 +218,24 @@ _MAX_VALUE = 120                                         # characters kept of on
 _MAX_DISTINCT = 20                                       # different values kept for one attribute
 _MAX_ROWS = 200                                          # rows read of one INSERT
 _MAX_VALUE_EXECUTIONS = 200                              # executions read of statements that differ only by their values
+_MAX_VARIANTS = 50                                       # different sets of values kept for one statement
+_MAX_VARIANT_SQL = 1000                                  # characters kept of the text of one execution
 _STRUCTURE = re.compile(r"[(),]")
 _LEAD = r"^[\s\0]*"
 _VALUE_INSERT = re.compile(_LEAD + r"(?:INSERT|REPLACE)\s+(?:(?:LOW_PRIORITY|DELAYED|HIGH_PRIORITY|IGNORE)\s+)*(?:INTO\s+)?"
                            + _NAME + r"\s*(?:\(([^()]*)\))?\s*", re.I)
 _VALUE_UPDATE = re.compile(_LEAD + r"UPDATE\s+(?:(?:LOW_PRIORITY|IGNORE)\s+)*" + _NAME + r"(?:\s+(?:AS\s+)?(?!SET\b)([\w$]+))?", re.I)
 _SET_WORD = re.compile(r"\bSET\b", re.I)
+_VALUE_DELETE = re.compile(_LEAD + r"DELETE\s+(?:(?:LOW_PRIORITY|QUICK|IGNORE)\s+)*(?P<targets>[^\0]*?)\bFROM\s+" + _NAME
+                           + r"(?:\s+(?:AS\s+)?(?!(?:WHERE|USING|JOIN|INNER|LEFT|RIGHT|CROSS|STRAIGHT_JOIN|ORDER|LIMIT|PARTITION)\b)([\w$]+))?", re.I)
+_VALUE_TRUNCATE = re.compile(_LEAD + r"TRUNCATE\s+(?:TABLE\s+)?" + _NAME, re.I)
+_WHERE_WORD = re.compile(r"\bWHERE\b", re.I)
+_WHERE_END = re.compile(r"\b(?:ORDER\s+BY|LIMIT|GROUP\s+BY|FOR\s+UPDATE|LOCK\s+IN)\b", re.I)
+_CONDITION_SPLIT = re.compile(r"[()]|\b(?:AND|OR|XOR)\b|&&|\|\|", re.I)
+_BETWEEN = re.compile(r"\bBETWEEN\b", re.I)
+_CONDITION = re.compile(r"[\s\0(]*((?:`[^`]+`|[\w$]+)(?:\s*\.\s*(?:`[^`]+`|[\w$]+))?)\s*"
+                        r"(<=>|<>|!=|<=|>=|=|<|>|NOT\s+IN\b|IN\b|NOT\s+LIKE\b|LIKE\b|IS\s+NOT\b|IS\b|NOT\s+BETWEEN\b|BETWEEN\b"
+                        r"|NOT\s+REGEXP\b|REGEXP\b|RLIKE\b)", re.I)
 _UPDATE_END = re.compile(r"\b(?:WHERE|ORDER\s+BY|LIMIT)\b", re.I)
 
 
@@ -290,6 +303,82 @@ def _assignments(sql, mask, start, end, open_at):
     return out
 
 
+def _depth0(mask, pattern, start, end=None):
+    """The first match of pattern from start that is not inside parentheses (a subquery), or None."""
+    end = len(mask) if end is None else end
+    for m in pattern.finditer(mask, start, end):
+        between = mask[start:m.start()]
+        if between.count("(") == between.count(")"):
+            return m
+    return None
+
+
+def _where_region(mask, start):
+    """(begin, end) of the conditions of the WHERE that follows start, or None when there is no WHERE."""
+    where = _depth0(mask, _WHERE_WORD, start)
+    if not where:
+        return None
+    stop = _depth0(mask, _WHERE_END, where.end())
+    return where.end(), stop.start() if stop else len(mask)
+
+
+def _wrapped(mask, a, b):
+    """(begin, end) inside the parentheses when the text between a and b is all in one pair of them, else None."""
+    text = mask[a:b]
+    left, right = len(text) - len(text.lstrip(" \t\r\n\0")), len(text.rstrip(" \t\r\n\0"))
+    if right - left < 2 or text[left] != "(" or text[right - 1] != ")":
+        return None
+    depth = 0
+    for i in range(left, right):
+        depth += 1 if text[i] == "(" else -1 if text[i] == ")" else 0
+        if depth == 0 and i < right - 1:
+            return None                                  # (a) = (b): two pairs
+    return a + left + 1, a + right - 1
+
+
+def _conditions(sql, mask, region, open_at, names):
+    """{column key: "= 5"} of the WHERE between region: one entry per comparison of a column of the table (owner in
+    names, or no owner). Conditions on the same column are joined with " / "."""
+    if not region:
+        return {}
+    start, end = region
+    pieces, depth, begin, between_done = [], 0, start, False
+    for m in _CONDITION_SPLIT.finditer(mask, start, end):
+        word = m.group()
+        if word == "(":
+            depth += 1
+        elif word == ")":
+            depth -= 1
+        elif depth == 0:
+            if word.upper() == "AND" and not between_done and _BETWEEN.search(mask, begin, m.start()):
+                between_done = True                      # the AND of  x BETWEEN 1 AND 5
+                continue
+            pieces.append((begin, m.start()))
+            begin, between_done = m.end(), False
+    pieces.append((begin, end))
+    out = {}
+    for a, b in pieces:
+        inner = _wrapped(mask, a, b)
+        if inner:                                        # (a = 1 OR b = 2): the conditions inside
+            for key, text in _conditions(sql, mask, inner, open_at, names).items():
+                out[key] = f"{out[key]} / {text}" if key in out and text not in out[key].split(" / ") else text
+            continue
+        m = _CONDITION.match(mask, a, b)
+        if not m:
+            continue
+        owner = _bare(m.group(1))[0]
+        if owner and norm(owner) not in names:
+            continue
+        operator = " ".join(m.group(2).upper().split())
+        value = sql[m.end():b].strip()
+        while value.endswith(")") and value.count(")") > value.count("("):
+            value = value[:-1].rstrip()                  # the parenthesis closed around the whole condition
+        text = f"{operator} {_value(value, cut_off=open_at is not None and b >= open_at)}".strip()
+        key = _column_key(m.group(1))
+        out[key] = f"{out[key]} / {text}" if key in out and text not in out[key].split(" / ") else text
+    return out
+
+
 def _column_key(written):
     return norm(_bare(written)[1])
 
@@ -327,24 +416,37 @@ def _values_of_update(sql, mask, head, open_at):
     where_set = _SET_WORD.search(mask, head.end() - (len(head.group(2)) if head.group(2) else 0))
     if not where_set:
         return []
+    names = {norm(table), norm(alias or table)}
     end = len(mask)
     for m in _UPDATE_END.finditer(mask, where_set.end()):
         between = mask[where_set.end():m.start()]
         if between.count("(") == between.count(")"):     # not the WHERE of a subquery
             end = m.start()
             break
-    names = {norm(table), norm(alias or table)}
     values = {}
     for written, value in _assignments(sql, mask, where_set.end(), end, open_at):
         owner = _bare(written)[0]
         if not owner or norm(owner) in names:            # UPDATE a JOIN b SET b.x = 1 is not a value of a
             values[_column_key(written)] = value
-    return [{"table": table, "values": values}] if values else []
+    where = _conditions(sql, mask, _where_region(mask, end), open_at, names)
+    return [{"table": table, "values": values, "where": where}] if values else []
+
+
+def _values_of_delete(sql, mask, head, open_at):
+    """The conditions that choose the rows deleted. DELETE a FROM a JOIN b ...: only the conditions of a."""
+    table, alias = _bare(head.group(2))[1], head.group(3)
+    targets = [_bare(t)[1] for t in head.group("targets").replace(".*", "").split(",") if t.strip()]
+    names = {norm(table), norm(alias or table)}
+    if targets and not names & {norm(t) for t in targets}:
+        return []                                        # the rows deleted are of another table of the JOIN
+    region = _where_region(mask, head.end())
+    return [{"table": table, "values": {}, "where": _conditions(sql, mask, region, open_at, names), "all_rows": not region}]
 
 
 def written_values(sql, catalog):
-    """{"insert": [{"table", "values"}...], "update": [...]}, read from the text: also when the parser cannot read it."""
-    out = {"insert": [], "update": []}
+    """{"insert": [{"table", "values"}...], "update": [{"table", "values", "where"}...], "delete": [{"table", "where",
+    "all_rows"}...]}, read from the text: also when the parser cannot read it."""
+    out = {"insert": [], "update": [], "delete": []}
     whole, _ = _same_length_mask(sql)
     begin = 0
     for stop in [m.start() for m in re.finditer(";", whole)] + [len(sql)]:
@@ -358,6 +460,14 @@ def written_values(sql, catalog):
         head = _VALUE_UPDATE.match(mask)
         if head:
             out["update"] += _values_of_update(part, mask, head, open_at)
+            continue
+        head = _VALUE_DELETE.match(mask)
+        if head:
+            out["delete"] += _values_of_delete(part, mask, head, open_at)
+            continue
+        head = _VALUE_TRUNCATE.match(mask)
+        if head:
+            out["delete"].append({"table": _bare(head.group(1))[1], "values": {}, "where": {}, "all_rows": True})
     return out
 
 
@@ -374,7 +484,7 @@ class _Totals:
         self.statements = self.partial = 0
         self.values_capped = False
         self.partial_examples = []
-        self.unresolved = set()
+        self.unresolved = {}                             # column -> tables of the statements that use it
 
     def _analyse(self, sql, keyword):
         if len(sql) <= _MAX_PARSED_LENGTH:
@@ -429,7 +539,8 @@ class _Totals:
             if not one or "other" in one:
                 continue
             merged["partial"] = merged["partial"] or one["partial"]
-            merged["unresolved"] |= one["unresolved"]
+            for column, tables in one["unresolved"].items():
+                merged["unresolved"].setdefault(column, set()).update(tables)
             merged["joins"] += one["joins"]
             for key, value in one["tables"].items():
                 into = merged["tables"].setdefault(key, {"columns": {}, "all": set()})
@@ -458,7 +569,8 @@ class _Totals:
             return
         self.statements += 1
         if first_time:
-            self.unresolved |= use["unresolved"]
+            for column, tables in use["unresolved"].items():
+                self.unresolved.setdefault(column, set()).update(tables)
             if use["partial"]:
                 self.partial += 1
                 if len(self.partial_examples) < 3:
@@ -466,9 +578,10 @@ class _Totals:
         for j in use["joins"]:
             self.joins.setdefault((norm(j["left_table"]), norm(j["left_column"]),
                                    norm(j["right_table"]), norm(j["right_column"])), j)
-        example = " ".join(sql[:400].split())
+        example = " ".join(sql[:_MAX_EXAMPLE_LENGTH].split()) + ("…" if len(sql) > _MAX_EXAMPLE_LENGTH else "")
         for (op, table), value in use["tables"].items():
-            info = self.by_op[op].setdefault(table, {"queries": 0, "partial": 0, "columns": {}, "all": {}, "examples": {}, "values": {}})
+            info = self.by_op[op].setdefault(table, {"queries": 0, "partial": 0, "columns": {}, "all": {}, "examples": {},
+                                                     "values": {}, "variants": {}, "all_rows": 0})
             info["queries"] += 1
             if use["partial"]:
                 info["partial"] += 1
@@ -482,7 +595,9 @@ class _Totals:
                 c["queries"] += 1
             for usage in value["all"]:
                 info["all"][usage] = info["all"].get(usage, 0) + 1
-        if any(op in ("insert", "update") for op, _ in use["tables"]):
+            if op != "select" and (key in info["variants"] or len(info["variants"]) < _MAX_EXAMPLES):
+                info["variants"].setdefault(key, {"executions": 0, "rows": {}, "more": False})["executions"] += 1
+        if any(op != "select" for op, _ in use["tables"]):
             self._add_values(sql, key)
 
     def _add_values(self, sql, key):
@@ -491,13 +606,28 @@ class _Totals:
             self.values_capped = True
             return
         catalog = self.analyzer.schema
+        text = " ".join(sql[:_MAX_VARIANT_SQL].split()) + ("…" if len(sql) > _MAX_VARIANT_SQL else "")
         for op, rows in written_values(sql, catalog).items():
             by_key = {norm(t): i for t, i in self.by_op[op].items()}
             for row in rows:
                 info = by_key.get(norm(catalog.canonical(row["table"])))
                 if not info:
                     continue
-                for column, value in row["values"].items():
+                if row.get("all_rows"):
+                    info["all_rows"] += 1
+                statement = info["variants"].get(key)
+                if statement is not None:                # one execution: its values stay together
+                    where = row.get("where", {})
+                    signature = (tuple(sorted(row["values"].items())), tuple(sorted(where.items())), bool(row.get("all_rows")))
+                    if signature in statement["rows"]:
+                        statement["rows"][signature]["count"] += 1
+                    elif len(statement["rows"]) < _MAX_VARIANTS:
+                        statement["rows"][signature] = {"values": row["values"], "where": where, "count": 1, "sql": text,
+                                                        "all_rows": bool(row.get("all_rows"))}
+                    else:
+                        statement["more"] = True
+                shown = row["values"] if op != "delete" else row.get("where", {})
+                for column, value in shown.items():
                     v = info["values"].setdefault(column, {"last": value, "distinct": {}, "more": False})
                     v["last"] = value
                     if value in v["distinct"] or len(v["distinct"]) < _MAX_DISTINCT:
@@ -541,8 +671,11 @@ def _table_result(name, info, catalog):
         columns.append(with_values({"name": u["name"], "type": "", "pk": False, "fk": False, "usage": sorted(u["usage"]),
                                     "whole_table": False, "queries": u["queries"], "in_dump": False}, key))
     examples = sorted(info["examples"].values(), key=lambda e: -e["count"])
+    variants = [{"executions": v["executions"], "more": v["more"], "rows": list(v["rows"].values())}
+                for v in sorted(info.get("variants", {}).values(), key=lambda v: -v["executions"]) if v["rows"]]
     return {"table": name, "in_dump": bool(known), "queries": info["queries"], "partial": info["partial"], "columns": columns,
-            "all_columns": bool(all_usage), "used": sum(1 for c in columns if c["usage"]), "examples": examples}
+            "all_columns": bool(all_usage), "used": sum(1 for c in columns if c["usage"]), "examples": examples,
+            "variants": variants, "all_rows": info.get("all_rows", 0)}
 
 
 def analyse(dump_folder, log_file, dialect="mysql"):
@@ -591,11 +724,19 @@ def analyse(dump_folder, log_file, dialect="mysql"):
                         + " | ".join(totals.partial_examples))
     if totals.unresolved:
         shown = sorted(totals.unresolved, key=str.lower)
+
+        def where(column):
+            tables = sorted(totals.unresolved[column], key=str.lower)
+            return (f"{column} (in queries on {', '.join(tables[:4])}{'…' if len(tables) > 4 else ''})" if tables
+                    else f"{column} (in queries without tables)")
         problems.append(f"{len(shown)} attributes could not be assigned to a table (no table name in the query, and not "
-                        f"found in the dump): {', '.join(shown[:12])}{'…' if len(shown) > 12 else ''}.")
+                        f"found in the dump): {', '.join(where(c) for c in shown[:12])}{'…' if len(shown) > 12 else ''}.")
     if totals.values_capped:
         problems.append(f"Values: only the first {_MAX_VALUE_EXECUTIONS} executions of each statement are read; "
                         "tables and attributes count them all.")
+    wipes = [f"{t['table']} ({t['all_rows']}×)" for t in groups["delete"] if t["all_rows"]]
+    if wipes:
+        problems.append("DELETE without WHERE or TRUNCATE (every row of the table is deleted): " + ", ".join(wipes) + ".")
     missing = sorted(n for n in used_names if not catalog.table(n))
     if missing:
         problems.append(f"Tables used in the log but not in the dump: {', '.join(missing)}.")

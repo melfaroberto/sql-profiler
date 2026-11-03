@@ -7,6 +7,7 @@ Sources, in order of preference:
   * a folder of .sql dumps or a single .sql file read by the built-in DDL reader: declared FKs only.
 """
 import gzip
+import io
 import json
 import logging
 import re
@@ -132,19 +133,68 @@ _ALTER_PK = re.compile(r"\bADD\s+(?:CONSTRAINT\s+[`\"\w$]*\s+)?PRIMARY\s+KEY\s*(
 _ALTER_FK = re.compile(r"\bFOREIGN\s+KEY\s*[`\"\w$]*\s*\((?P<cols>[^)]*)\)\s*REFERENCES\s+(?P<to>[`\"\w.$]+)\s*(?:\((?P<to_cols>[^)]*)\))?", re.I)
 
 
+# Dumps of tens of GB: big read buffers, and lines read in pieces of bounded size, so that a single huge INSERT line
+# (extended inserts, BLOBs) never has to be held in memory whole.
+READ_BUFFER = 16 * 1024 * 1024                          # bytes asked to the disk at a time
+_PIECE = 4 * 1024 * 1024                                 # longest piece of a line read at a time
+_MAX_DDL = 64 * 1024 * 1024                              # a "CREATE TABLE" longer than this is not one: it is data
+_DDL_BYTES = re.compile(rb"^[ \t\r]*(CREATE\s+(TEMPORARY\s+)?TABLE|ALTER\s+TABLE)\b", re.I)
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _is_utf16(path):
+    with open(path, "rb") as f:
+        return f.read(2) in (b"\xff\xfe", b"\xfe\xff")
+
+
+def open_binary(path):
+    """A file for reading as bytes with a big buffer, gzip compressed or not."""
+    path = Path(path)
+    if path.suffix.lower() == ".gz":
+        return io.BufferedReader(gzip.open(path, "rb"), buffer_size=READ_BUFFER)
+    return open(path, "rb", buffering=READ_BUFFER)
+
+
 def open_text(path):
     """A text file for reading, whatever a server or Windows left it as: gzip compressed, UTF-16 with BOM, or broken bytes."""
     path = Path(path)
     if path.suffix.lower() == ".gz":
-        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
-    with open(path, "rb") as f:
-        utf16 = f.read(2) in (b"\xff\xfe", b"\xfe\xff")
-    return open(path, encoding="utf-16" if utf16 else "utf-8-sig", errors="replace")
+        return io.TextIOWrapper(open_binary(path), encoding="utf-8-sig", errors="replace")
+    return open(path, encoding="utf-16" if _is_utf16(path) else "utf-8-sig", errors="replace", buffering=READ_BUFFER)
 
 
 def _ddl_statements(path):
     """CREATE TABLE and ALTER TABLE statements of a dump file, read line by line (dumps can be huge: data lines are
     skipped). ALTER TABLE matters because some tools, like phpMyAdmin, export their keys that way."""
+    path = Path(path)
+    if path.suffix.lower() != ".gz" and _is_utf16(path):
+        yield from _ddl_statements_text(path)
+        return
+    block, size, line_start, first = None, 0, True, True
+    with open_binary(path) as f:
+        while True:
+            piece = f.readline(_PIECE)                   # a whole line, or the next piece of a long one
+            if not piece:
+                break
+            if first:
+                piece, first = piece.removeprefix(_UTF8_BOM), False
+            starts, line_start = line_start, piece.endswith(b"\n")
+            if block is None:
+                if not starts or not _DDL_BYTES.match(piece):
+                    continue                             # data: skipped without being decoded
+                block, size = [], 0
+            block.append(piece)
+            size += len(piece)
+            if line_start and piece.rstrip().endswith(b";"):
+                yield b"".join(block).decode("utf-8", "replace").rstrip().rstrip(";")
+                block = None
+            elif size > _MAX_DDL:
+                log.warning("schema: %s: a CREATE/ALTER TABLE without its ; after %d MB, skipped", path.name, size >> 20)
+                block = None
+
+
+def _ddl_statements_text(path):
+    """The same for a UTF-16 dump, which cannot be scanned as bytes."""
     block = None
     with open_text(path) as f:
         for line in f:

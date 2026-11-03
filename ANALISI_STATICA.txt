@@ -29,7 +29,9 @@ I FILE IN INGRESSO
 ------------------
 Cartella del dump
   Tutti i file .sql (anche .sql.gz), comprese le sottocartelle. Servono i CREATE TABLE;
-  i dati vengono saltati, quindi anche dump enormi si leggono in fretta. Le chiavi
+  i dati vengono saltati senza essere decodificati, quindi anche dump enormi (decine
+  di GB) si leggono in fretta: il file viene letto a blocchi da 16 MB e le righe di dati
+  lunghissime (INSERT estese, BLOB) a pezzi da 4 MB, senza mai tenerle intere in memoria. Le chiavi
   vengono lette anche dagli ALTER TABLE (come esporta phpMyAdmin).
 
 Log .csv
@@ -66,8 +68,10 @@ Sezioni SELECT / INSERT / UPDATE (e DELETE, se il log ne contiene)
     grigio     il log non lo usa con questa operazione
     intestazione grigia: tabella che non esiste nel dump
     PK / FK    chiave primaria / chiave esterna
-  Passando col mouse su un attributo si vedono il tipo e gli usi. "Example statements"
-  mostra fino a 5 query diverse, ciascuna col numero di esecuzioni.
+  Passando col mouse su un attributo si vedono il tipo e gli usi. Sotto ogni tabella,
+  "Statements executed" mostra fino a 20 query diverse eseguite su quella tabella
+  (fino a 2000 caratteri ciascuna), ognuna col numero di esecuzioni. Il bottone
+  "Show queries" in alto le apre tutte insieme sotto ogni tabella; "Hide queries" le richiude.
 
   Valori scritti (sezioni INSERT e UPDATE)
     Accanto a ogni attributo c'è il valore scritto, così come appare nella query:
@@ -81,9 +85,29 @@ Sezioni SELECT / INSERT / UPDATE (e DELETE, se il log ne contiene)
     UPDATE: il valore compare solo per gli attributi aggiornati; gli altri restano vuoti.
     Con più esecuzioni si vede l'ultimo valore, con il numero degli altri: 'abc' (+3).
     Passando col mouse sul valore si vedono tutti, con quante volte è stato usato ciascuno.
+    Esecuzioni: sotto ogni tabella delle sezioni INSERT, UPDATE e DELETE c'è un menu a
+    tendina ("Values of each execution") con le esecuzioni diverse di ogni query,
+    raggruppate per query ("Query 1 · 12 runs"). Scegliendone una (o scorrendo con ‹ ›)
+    la tabella mostra i valori di quella esecuzione, tutti insieme, e sotto c'è il testo
+    della query eseguita. In grassetto sottolineato i valori cambiati rispetto
+    all'esecuzione precedente della stessa query; in arancione le condizioni della WHERE
+    (es. "= 7", "IN (1, 2)"). Ogni riga di una INSERT multipla è un'esecuzione a sé.
+    Si conservano fino a 50 esecuzioni diverse per query.
+    Passando col mouse su un valore si vedono anche tutti i valori visti per quell'attributo.
     Una query troncata dal log mostra … alla fine del valore; dopo il taglio non si
     inventano valori. Si conservano 20 valori diversi per attributo e 120 caratteri per
     valore; si leggono le prime 200 esecuzioni di ogni query e 200 righe per ogni INSERT.
+
+  Sezione DELETE (sempre presente)
+    Per ogni tabella: gli attributi usati nella WHERE, in arancione con la condizione
+    dell'esecuzione scelta, cioè quali righe vengono cancellate. Funziona anche con
+    DELETE a FROM a JOIN b (contano solo le condizioni della tabella cancellata).
+    DELETE senza WHERE e TRUNCATE cancellano tutte le righe: la tabella lo segnala in
+    rosso ("every row") e compare un avviso nel riquadro in alto.
+
+  Attributi non assegnati: l'avviso "attributes could not be assigned to a table" dice,
+  per ogni attributo, su quali tabelle lavorava la query che lo usa, per esempio
+  "Label (in queries on clienti, ordini)".
 
   "Save tables (.svg)" salva tutte le tabelle, divise per operazione, in un'immagine SVG.
 

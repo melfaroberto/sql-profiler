@@ -317,3 +317,46 @@ def test_long_values_are_shortened_and_selects_have_none(tmp_path, dump):
 def test_values_of_other_tables_do_not_mix_and_case_is_ignored(tmp_path, dump):
     r = staticmap.analyse(dump, log(tmp_path, [q("INSERT INTO RIGHE (QTA) VALUES (4)"), q("INSERT INTO clienti (nome) VALUES ('n')")]))
     assert values(r, "insert", "righe")["qta"] == "4" and "qta" not in values(r, "insert", "clienti")
+
+
+def test_unassigned_attributes_say_the_tables_of_their_query(tmp_path, dump):
+    r = staticmap.analyse(dump, log(tmp_path, [q("SELECT misteriosa FROM clienti c JOIN ordini o ON o.id_cliente = c.id")]))
+    note = next(p for p in r["problems"] if "misteriosa" in p)
+    assert "misteriosa (in queries on clienti, ordini)" in note
+
+
+def test_each_execution_keeps_its_own_values(tmp_path, dump):
+    r = staticmap.analyse(dump, log(tmp_path, [q("UPDATE ordini SET stato = 'A', totale = 1 WHERE id = 7"),
+                                               q("UPDATE ordini SET stato = 'B', totale = 1 WHERE id = 8"),
+                                               q("UPDATE ordini SET stato = 'A', totale = 1 WHERE id = 7")]))
+    t = table(r, "update", "ordini")
+    assert len(t["variants"]) == 1 and t["variants"][0]["executions"] == 3
+    rows = t["variants"][0]["rows"]
+    assert [(x["values"], x["where"], x["count"]) for x in rows] == [
+        ({"stato": "'A'", "totale": "1"}, {"id": "= 7"}, 2), ({"stato": "'B'", "totale": "1"}, {"id": "= 8"}, 1)]
+    assert "WHERE id = 8" in rows[1]["sql"]
+
+
+def test_insert_rows_are_executions_of_their_own(tmp_path, dump):
+    r = staticmap.analyse(dump, log(tmp_path, [q("INSERT INTO righe (id, qta) VALUES (1, 10), (2, 20)")]))
+    rows = table(r, "insert", "righe")["variants"][0]["rows"]
+    assert [x["values"]["qta"] for x in rows] == ["10", "20"] and rows[0]["values"]["id_ordine"] == "NULL"
+
+
+def test_delete_conditions_and_deletes_of_every_row(tmp_path, dump):
+    r = staticmap.analyse(dump, log(tmp_path, [
+        q("DELETE FROM righe WHERE id_ordine = 5 AND qta BETWEEN 1 AND 3"),
+        q("DELETE FROM righe WHERE (id = 1 OR id = 2) AND qta IS NOT NULL"),
+        q("DELETE FROM ordini"), q("TRUNCATE TABLE clienti")]))
+    rows = table(r, "delete", "righe")["variants"]
+    assert {tuple(sorted(x["where"].items())) for v in rows for x in v["rows"]} == {
+        (("id_ordine", "= 5"), ("qta", "BETWEEN 1 AND 3")), (("id", "= 1 / = 2"), ("qta", "IS NOT NULL"))}
+    assert table(r, "delete", "ordini")["all_rows"] == 1 and table(r, "delete", "clienti")["all_rows"] == 1
+    assert table(r, "delete", "righe")["all_rows"] == 0
+    assert any("every row of the table is deleted" in p and "ordini (1×)" in p for p in r["problems"])
+
+
+def test_delete_with_join_keeps_only_the_conditions_of_the_target(tmp_path, dump):
+    r = staticmap.analyse(dump, log(tmp_path, [
+        q("DELETE o FROM ordini o JOIN clienti c ON c.id = o.id_cliente WHERE c.citta = 'Roma' AND o.stato <> 'X'")]))
+    assert table(r, "delete", "ordini")["variants"][0]["rows"][0]["where"] == {"stato": "<> 'X'"}

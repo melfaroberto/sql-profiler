@@ -918,7 +918,7 @@ function setMode(mode, remember = true) {
 
 // ====================================================================== static analysis
 
-const staticState = { result: null, view: null, running: false };
+const staticState = { result: null, view: null, running: false, showQueries: false, variant: {} };
 const OP_LABELS = { select: "SELECT", insert: "INSERT", update: "UPDATE", delete: "DELETE" };
 
 function staticPaths(write) {
@@ -938,11 +938,12 @@ async function runStatic(e) {
   staticState.running = true;
   staticPaths(true);
   $("static-run").disabled = true;
-  $("static-status").textContent = "Reading the dump and the log… a big log can take a few minutes.";
+  $("static-status").textContent = "Reading the dump and the log… a dump of many GB or a big log can take several minutes.";
   $("static-error").hidden = true;
   try {
     staticState.result = await api("/api/static", { method: "POST",
       body: { dump: $("static-dump").value.trim(), log: $("static-log").value.trim() } });
+    staticState.variant = {};
     renderStatic();
   } catch (err) {
     staticState.result = null;
@@ -984,25 +985,82 @@ function renderStatic() {
 // a table of the log as a box of the diagram; every column is there, the ones the log uses highlighted
 const VALUE_WIDTH = 30;
 
-// what the box shows of the values written to an attribute: the last one, and how many others there are
-function valueLabel(c) {
-  if (c.value === undefined) return {};
-  const others = c.values.length - 1;
-  const text = c.value.length > VALUE_WIDTH ? c.value.slice(0, VALUE_WIDTH - 1) + "…" : c.value;
-  const lines = c.values.map(([v, n]) => `${v}${n > 1 ? `   (${n}×)` : ""}`);
-  return { valueText: text + (others > 0 ? ` (+${others}${c.more_values ? "+" : ""})` : ""),
-           valueTip: `${c.name}: ${others > 0 ? "last value " + c.value + "\n\nAll the values:\n" : ""}${lines.join("\n")}${
-             c.value === "NULL" && c.usage.length === 0 ? "\n\nNot in the statement: NULL, unless the column has a default or is auto-increment." : ""}` };
+// the executions of the statements of a table, one after the other: each keeps its own values
+const flatVariants = t => (t.variants || []).flatMap((st, si) => st.rows.map((row, ri) => ({ ...row, si, ri, statement: st })));
+const columnKey = name => String(name).replace(/[`"\[\]]/g, "").trim().toLowerCase();
+const shorten = v => v.length > VALUE_WIDTH ? v.slice(0, VALUE_WIDTH - 1) + "…" : v;
+const variantKey = (op, t) => `${op}|${t.table}`;
+
+// what the box shows next to an attribute: the value written by the chosen execution (or its WHERE condition);
+// in orange the conditions, in bold what changed from the previous execution of the same statement
+function valueLabel(c, row, previous) {
+  const all = (c.values || []).map(([v, n]) => `${v}${n > 1 ? `   (${n}×)` : ""}`).join("\n");
+  const tip = text => `${c.name}: ${text}${all ? `\n\nAll the values seen:\n${all}${c.more_values ? "\n…" : ""}` : ""}`;
+  if (!row) return {};
+  const key = columnKey(c.name), shown = r => r && (r.values[key] !== undefined ? r.values[key] : r.where[key]);
+  const value = row.values[key], cond = row.where[key];
+  if (value === undefined && cond === undefined) return {};
+  const changed = previous && shown(previous) !== shown(row) ? " changed" : "";
+  if (value !== undefined) {
+    return { valueText: shorten(value), valueClass: changed.trim(),
+             valueTip: tip(`${value}${value === "NULL" && c.usage.length === 0 ? "\nNot in the statement: NULL, unless the column has a default or is auto-increment." : ""}`) };
+  }
+  return { valueText: shorten(cond), valueClass: ("cond" + changed), valueTip: tip(`WHERE ${c.name} ${cond}`) };
 }
 
-function staticBox(t) {
-  return { name: t.table, known: t.in_dump, access: "", mute: true, badge: `${t.queries}×`,
-           note: t.partial ? `⚠ ${t.partial} unread: attributes may be missing` : "",
-           columns: t.columns.map(c => ({ ...c, ...valueLabel(c), type: c.in_dump || !t.in_dump ? c.type : "not in dump", used: c.usage, refs: [] })) };
+function staticBox(t, op) {
+  const flat = flatVariants(t);
+  const at = Math.min(staticState.variant[variantKey(op, t)] || 0, Math.max(flat.length - 1, 0));
+  const row = flat[at], previous = row && row.ri > 0 ? flat[at - 1] : null;
+  const notes = [t.partial ? `⚠ ${t.partial} unread: attributes may be missing` : "",
+                 row && row.all_rows ? "⚠ no WHERE: every row is deleted" : ""].filter(Boolean);
+  return { name: t.table, known: t.in_dump, access: "", mute: true, badge: `${t.queries}×`, note: notes.join(" · "),
+           columns: t.columns.map(c => ({ ...c, ...valueLabel(c, row, previous), type: c.in_dump || !t.in_dump ? c.type : "not in dump", used: c.usage, refs: [] })) };
+}
+
+// the menu of the executions under a table: grouped by statement, with ‹ › to move through them
+function variantMenu(t, op) {
+  const flat = flatVariants(t);
+  if (!flat.length) return "";
+  const at = Math.min(staticState.variant[variantKey(op, t)] || 0, flat.length - 1);
+  const summary = row => {
+    const parts = [...Object.entries(row.values).filter(([, v]) => v !== "NULL").map(([k, v]) => `${k}=${v}`),
+                   ...Object.entries(row.where).map(([k, v]) => `${k} ${v}`)];
+    const text = row.all_rows ? "all the rows" : parts.join(", ") || "no values";
+    return text.length > 90 ? text.slice(0, 89) + "…" : text;
+  };
+  const groups = (t.variants || []).map((st, si) => `<optgroup label="Query ${si + 1} · ${st.executions} run${st.executions === 1 ? "" : "s"}${
+      st.rows.length > 1 ? ` · ${st.rows.length}${st.more ? "+" : ""} different values` : ""}">${
+      flat.map((row, i) => row.si !== si ? "" : `<option value="${i}"${i === at ? " selected" : ""}>${row.ri + 1}. ${esc(summary(row))}${
+        row.count > 1 ? ` — ${row.count}×` : ""}</option>`).join("")}</optgroup>`).join("");
+  return `<div class="op-variants">
+      <div class="op-variants-title">${op === "delete" ? "Rows deleted by each execution" : "Values of each execution"}
+        <span class="muted">${at + 1} / ${flat.length}</span></div>
+      <div class="op-variants-bar"><button class="small" type="button" data-step="-1" title="Previous execution"${at === 0 ? " disabled" : ""}>‹</button>
+        <select title="The different executions of the statements on this table: choose one to see its values in the table">${groups}</select>
+        <button class="small" type="button" data-step="1" title="Next execution"${at === flat.length - 1 ? " disabled" : ""}>›</button></div>
+      <pre class="sql op-variant-sql">${SqlHL.highlight(flat[at].sql)}</pre></div>`;
+}
+
+function showVariant(item, t, op, index) {
+  const flat = flatVariants(t);
+  staticState.variant[variantKey(op, t)] = Math.max(0, Math.min(index, flat.length - 1));
+  item.querySelector("svg").replaceWith(MiniER.tableBox(staticBox(t, op)));
+  item.querySelector(".op-variants").outerHTML = variantMenu(t, op);
+  bindVariant(item, t, op);
+}
+
+function bindVariant(item, t, op) {
+  const menu = item.querySelector(".op-variants");
+  if (!menu) return;
+  menu.querySelector("select").onchange = e => showVariant(item, t, op, Number(e.target.value));
+  menu.querySelectorAll("[data-step]").forEach(b => {
+    b.onclick = () => showVariant(item, t, op, (staticState.variant[variantKey(op, t)] || 0) + Number(b.dataset.step));
+  });
 }
 
 const OP_COLORS = { select: "#1f66b5", insert: "#1f7a3d", update: "#b85a00", delete: "#b5281c" };
-const shownOps = r => Object.keys(OP_LABELS).filter(op => op !== "delete" || r.groups.delete.length);
+const shownOps = () => Object.keys(OP_LABELS);
 
 function renderStaticGroups() {
   const r = staticState.result, f = $("static-filter").value.trim().toLowerCase();
@@ -1013,18 +1071,24 @@ function renderStaticGroups() {
     const tables = r.groups[op].filter(matches);
     const section = document.createElement("section");
     section.className = `op-col ${op}`;
-    section.innerHTML = `<h3>${OP_LABELS[op]}<span class="muted">${tables.length} table${tables.length === 1 ? "" : "s"}</span></h3>`;
+    const wipes = op === "delete" ? tables.filter(t => t.all_rows).length : 0;
+    section.innerHTML = `<h3>${OP_LABELS[op]}<span class="muted">${tables.length} table${tables.length === 1 ? "" : "s"}${
+      wipes ? ` · <span class="op-wipe">${wipes} deleted entirely (no WHERE / TRUNCATE)</span>` : ""}</span></h3>`;
     const list = document.createElement("div");
     list.className = "op-boxes";
-    if (!tables.length) list.innerHTML = `<p class="none">${f ? "No match." : "No table."}</p>`;
+    if (!tables.length) list.innerHTML = `<p class="none">${f ? "No match." : op === "delete" ? "The log deletes nothing." : "No table."}</p>`;
     for (const t of tables) {
       const item = document.createElement("div");
       item.className = "op-box";
-      item.append(MiniER.tableBox(staticBox(t)));
-      const facts = t.columns.length ? `${t.used} of ${t.columns.length} attributes used` : "attributes not known";
-      item.insertAdjacentHTML("beforeend", `<div class="op-facts">${facts} · ${t.queries} quer${t.queries === 1 ? "y" : "ies"}</div>
-        <details><summary>Example statements</summary>${t.examples.map(x =>
-          `<pre>${x.count > 1 ? `[${x.count}×] ` : ""}${esc(x.sql)}</pre>`).join("")}</details>`);
+      item.append(MiniER.tableBox(staticBox(t, op)));
+      const facts = t.columns.length ? `${t.used} of ${t.columns.length} attributes ${op === "delete" ? "in the WHERE" : "used"}` : "attributes not known";
+      item.insertAdjacentHTML("beforeend", `<div class="op-facts">${facts} · ${t.queries} quer${t.queries === 1 ? "y" : "ies"}${
+          t.all_rows ? ` · <span class="op-wipe">${t.all_rows}× every row</span>` : ""}</div>
+        ${variantMenu(t, op)}
+        <details class="op-queries"${staticState.showQueries ? " open" : ""}><summary>Statements executed (${t.examples.length}${
+          t.examples.length < t.queries ? ` different, ${t.queries} runs` : ""})</summary>${t.examples.map(x =>
+          `<pre class="sql">${x.count > 1 ? `<span class="op-runs">${x.count}×</span> ` : ""}${SqlHL.highlight(x.sql)}</pre>`).join("")}</details>`);
+      bindVariant(item, t, op);
       list.append(item);
     }
     section.append(list);
@@ -1032,10 +1096,19 @@ function renderStaticGroups() {
   }
 }
 
+function toggleStaticQueries() {
+  staticState.showQueries = !staticState.showQueries;
+  const b = $("static-queries");
+  b.textContent = staticState.showQueries ? "Hide queries" : "Show queries";
+  b.setAttribute("aria-pressed", String(staticState.showQueries));
+  b.classList.toggle("primary", staticState.showQueries);
+  document.querySelectorAll("#static-groups details.op-queries").forEach(d => { d.open = staticState.showQueries; });
+}
+
 function saveStaticTables() {
   const r = staticState.result, s = r.summary;
   const image = MiniER.tablesToSvg(
-    shownOps(r).map(op => ({ label: OP_LABELS[op], color: OP_COLORS[op], tables: r.groups[op].map(staticBox) })),
+    shownOps(r).map(op => ({ label: OP_LABELS[op], color: OP_COLORS[op], tables: r.groups[op].map(t => staticBox(t, op)) })),
     { title: `Tables used in ${r.log}`, subtitle: `${s.tables} tables · ${s.statements} statements${s.first ? ` · from ${s.first} to ${s.last}` : ""}` });
   saveBlob(new Blob([image.svg], { type: "image/svg+xml" }), staticName("svg").replace(/\.svg$/, "-tables.svg"));
 }
@@ -1099,6 +1172,7 @@ function bindStatic() {
   $("static-svg").onclick = () => saveStaticImage("svg");
   $("static-csv").onclick = saveStaticCsv;
   $("static-tables-svg").onclick = saveStaticTables;
+  $("static-queries").onclick = toggleStaticQueries;
   staticPaths(false);
   let saved = "live";
   try { saved = localStorage.getItem("sql-profiler-mode") || "live"; } catch { /* only a convenience */ }

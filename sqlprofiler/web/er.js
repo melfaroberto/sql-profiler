@@ -144,7 +144,7 @@ const MiniER = (() => {
       name.append(ct);
       g.append(name);
       if (c.valueText) {
-        const value = el("text", { class: "value" + (c.valueText === "NULL" ? " null" : ""), x: t.valueX, y: y + 13 }, c.valueText);
+        const value = el("text", { class: "value" + (c.valueText === "NULL" ? " null" : "") + (c.valueClass ? " " + c.valueClass : ""), x: t.valueX, y: y + 13 }, c.valueText);
         if (c.valueTip) value.append(el("title", {}, c.valueTip));
         g.append(value);
       }
@@ -278,6 +278,7 @@ const MiniER = (() => {
     .er-table text.more { fill: #5f6b7a; font-style: italic; }
     .er-table rect.used { fill: #e7eef6; } .er-table rect.used.write { fill: #fdecea; } .er-table rect.used.filter { fill: #fbf0e2; } .er-table text.used { font-weight: 700; }
     .er-table text.value { fill: #1d2330; } .er-table text.value.null { fill: #8a94a3; font-style: italic; }
+    .er-table text.value.cond { fill: #b85a00; } .er-table text.value.changed { font-weight: 700; text-decoration: underline; }
     .er-table text.unused { fill: #8a94a3; } .er-table text.note { fill: #b85a00; font-size: 10.5px; }
     .img-section { font-size: 15px; font-weight: 700; }
     .er-link { fill: none; stroke-width: 1.6; } .er-link.declared { stroke: #1f4e79; }
