@@ -94,40 +94,205 @@ const MiniER = (() => {
     return { width: Math.max(x - GAP_X, 1), height: Math.max(maxH, 1) };
   }
 
-  // For many tables: each group of connected tables is laid out by dagre, then the groups are placed in rows that
-  // give the picture about the shape of a screen. Needs dagre to be loaded (the log diagram does).
+  const RANK_SEP = 100, NODE_SEP = 26, ASPECT = 1.6;   // the shape aimed at: about that of a screen
+  const edgeKey = e => `${e.parent}|${norm(e.pcol)}|${e.child}|${norm(e.ccol)}|${e.kind}`;
+
+  /** Moves some tables and the routes of the lines among them. */
+  function shift(members, es, dx, dy) {
+    const inside = new Set(members.map(t => norm(t.name)));
+    members.forEach(t => { t.x += dx; t.y += dy; });
+    es.forEach(e => {
+      if (e.route && inside.has(e.parent) && inside.has(e.child)) e.route = e.route.map(([a, b, y]) => [a + dx, b + dx, y + dy]);
+    });
+  }
+
+  /** Columns (ranks) of the tables of one connected group: every referenced table left of the ones pointing to it,
+   *  and no column with many more tables than the others, so that the group is about as wide as a screen. */
+  function ranks(members, es, cap) {
+    const names = members.map(t => norm(t.name)), size = Object.fromEntries(members.map(t => [norm(t.name), t]));
+    const kids = Object.fromEntries(names.map(n => [n, new Set()])), dads = Object.fromEntries(names.map(n => [n, new Set()]));
+    // the links without cycles: a depth-first visit drops the ones going back
+    const state = {};
+    const visit = n => {
+      state[n] = 1;
+      for (const e of es) {
+        if (e.parent !== n || e.child === n || !(e.child in kids)) continue;
+        if (state[e.child] === 1) continue;                       // back to a table being visited: a cycle
+        kids[n].add(e.child);
+        dads[e.child].add(n);
+        if (!state[e.child]) visit(e.child);
+      }
+      state[n] = 2;
+    };
+    names.forEach(n => { if (!state[n]) visit(n); });
+    // topological order, then: as far left as possible, then every table with children just left of the nearest one
+    const order = [], seen = new Set();
+    const topo = n => { if (seen.has(n)) return; seen.add(n); dads[n].forEach(topo); order.push(n); };
+    names.forEach(topo);
+    const rank = {};
+    order.forEach(n => { rank[n] = Math.max(0, ...[...dads[n]].map(d => rank[d] + 1)); });
+    [...order].reverse().forEach(n => { if (kids[n].size) rank[n] = Math.min(...[...kids[n]].map(k => rank[k])) - 1; });
+
+    const push = (n, r, moved) => {                            // n to column r, its children further right
+      rank[n] = r;
+      moved.add(n);
+      kids[n].forEach(k => { if (rank[k] <= r) push(k, r + 1, moved); });
+      return moved;
+    };
+    for (let r = Math.min(...names.map(n => rank[n])); r <= Math.max(...names.map(n => rank[n])); r++) {
+      for (;;) {
+        const here = names.filter(n => rank[n] === r);
+        if (here.length <= cap) break;
+        const count = q => names.filter(n => rank[n] === q).length;
+        let best = null;
+        for (const n of here) {
+          // left, to the nearest column with room after all its parents: the links to the children get longer
+          const lowest = Math.max(...[...dads[n]].map(d => rank[d] + 1), -Infinity);
+          for (let q = r - 1; q >= Math.max(lowest, r - 4); q--) {
+            if (count(q) < cap) {
+              const cost = (kids[n].size - dads[n].size) * (r - q) + (r - q) * 0.1;
+              if (!best || cost < best.cost) best = { cost, n, q };
+              break;
+            }
+          }
+          // right, one column: the children right after it go one further
+          const tries = new Set();
+          const saved = { ...rank };
+          push(n, r + 1, tries);
+          Object.assign(rank, saved);
+          const cost = dads[n].size - kids[n].size + (tries.size - 1) * 3 + 0.05;
+          if (!best || cost < best.cost) best = { cost, n, q: r + 1 };
+        }
+        if (best.q < r) rank[best.n] = best.q; else push(best.n, best.q, new Set());
+      }
+    }
+    const first = Math.min(...names.map(n => rank[n]));
+    names.forEach(n => { rank[n] -= first; });
+    return { rank, kids, size };
+  }
+
+  /** About how many lines cross, taking each line as straight from table to table. */
+  function crossings(at, members, es) {
+    const size = Object.fromEntries(members.map(t => [norm(t.name), t]));
+    const seg = es.filter(e => e.parent !== e.child && at[e.parent] && at[e.child]).map(e => {
+      const p = at[e.parent], c = at[e.child], pt = size[e.parent], ct = size[e.child];
+      return [p.x + pt.w, p.y + pt.h / 2, c.x, c.y + ct.h / 2, e.parent, e.child];
+    });
+    const side = (ax, ay, bx, by, cx, cy) => Math.sign((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+    let n = 0;
+    for (let i = 0; i < seg.length; i++) {
+      for (let j = i + 1; j < seg.length; j++) {
+        const [a, b] = [seg[i], seg[j]];
+        if (a[4] === b[4] || a[4] === b[5] || a[5] === b[4] || a[5] === b[5]) continue;
+        if (side(...a.slice(0, 4), b[0], b[1]) * side(...a.slice(0, 4), b[2], b[3]) < 0 &&
+            side(...b.slice(0, 4), a[0], a[1]) * side(...b.slice(0, 4), a[2], a[3]) < 0) n++;
+      }
+    }
+    return n;
+  }
+
+  /** One group laid out with at most cap tables per column: {at: {name: {x, y}}, routes: Map edge -> route, w, h}. */
+  function arrange(members, es, cap) {
+    const { rank, kids } = ranks(members, es, cap);
+    const g = new dagre.graphlib.Graph({ multigraph: true });
+    g.setGraph({ rankdir: "LR", nodesep: NODE_SEP, ranksep: RANK_SEP, edgesep: 14, marginx: 0, marginy: 0 });
+    g.setDefaultEdgeLabel(() => ({}));
+    members.forEach(t => g.setNode(norm(t.name), { width: t.w, height: t.h }));
+    const mine = es.filter(e => e.parent in rank && e.child in rank && kids[e.parent].has(e.child));
+    mine.forEach((e, i) => g.setEdge(e.parent, e.child, { minlen: rank[e.child] - rank[e.parent] }, `e${i}`));
+    dagre.layout(g);
+    members.forEach(t => { const n = g.node(norm(t.name)); t.x = n.x - t.w / 2; t.y = n.y - t.h / 2; });
+    // the lines that cross columns of tables go through the gap dagre left for them, straight across the column
+    const span = {};
+    members.forEach(t => {
+      const r = rank[norm(t.name)];
+      span[r] = span[r] ? [Math.min(span[r][0], t.x), Math.max(span[r][1], t.x + t.w)] : [t.x, t.x + t.w];
+    });
+    const routes = new Map();
+    mine.forEach((e, i) => {
+      if (rank[e.child] - rank[e.parent] < 2) return;
+      const points = g.edge(e.parent, e.child, `e${i}`).points || [];
+      const route = [];
+      for (let r = rank[e.parent] + 1; r < rank[e.child]; r++) {
+        const [a, b] = span[r];
+        const inside = points.filter(p => p.x >= a - 1 && p.x <= b + 1);
+        if (!inside.length) return;
+        route.push([a, b, inside.reduce((s, p) => s + p.y, 0) / inside.length]);
+      }
+      routes.set(e, route);
+    });
+    const x0 = Math.min(...members.map(t => t.x)), y0 = Math.min(...members.map(t => t.y));
+    const at = Object.fromEntries(members.map(t => [norm(t.name), { x: t.x - x0, y: t.y - y0 }]));
+    routes.forEach((route, e) => routes.set(e, route.map(([a, b, y]) => [a - x0, b - x0, y - y0])));
+    return { at, routes, w: Math.max(...members.map(t => t.x + t.w)) - x0, h: Math.max(...members.map(t => t.y + t.h)) - y0 };
+  }
+
+  // For many tables: each group of connected tables is laid out in columns (ranks()) by dagre, which orders the
+  // tables of each column to cross few lines and routes the long lines between the tables; then the groups are
+  // placed in rows that give the picture about the shape of a screen. Needs dagre (the pages that use it load it).
   function graphLayout(tables, es) {
     const parent = Object.fromEntries(tables.map(t => [norm(t.name), norm(t.name)]));
     const find = k => parent[k] === k ? k : (parent[k] = find(parent[k]));
-    es.forEach(e => { parent[find(e.child)] = find(e.parent); });
+    es.forEach(e => { if (e.parent in parent && e.child in parent) parent[find(e.child)] = find(e.parent); });
     const groups = new Map();
     tables.forEach(t => {
       const k = find(norm(t.name));
       groups.set(k, [...(groups.get(k) || []), t]);
     });
-    const boxes = [...groups.entries()].map(([k, members]) => {
-      const g = new dagre.graphlib.Graph({ multigraph: true });
-      g.setGraph({ rankdir: "LR", nodesep: 28, ranksep: 110, edgesep: 12, marginx: 0, marginy: 0 });
-      g.setDefaultEdgeLabel(() => ({}));
-      members.forEach(t => g.setNode(norm(t.name), { width: t.w, height: t.h }));
-      es.forEach((e, i) => { if (e.parent !== e.child && find(e.parent) === k) g.setEdge(e.parent, e.child, {}, `e${i}`); });
-      dagre.layout(g);
-      members.forEach(t => { const n = g.node(norm(t.name)); t.x = n.x - t.w / 2; t.y = n.y - t.h / 2; });
+    es.forEach(e => { delete e.route; });
+    const boxes = [...groups.values()].map(members => {
+      if (members.length === 1) {
+        members[0].x = 0; members[0].y = 0;
+        return { members, w: members[0].w, h: members[0].h };
+      }
+      // a few column heights, keeping the one that gives the shape nearest to that of a screen
+      const avgW = members.reduce((s, t) => s + t.w, 0) / members.length + RANK_SEP;
+      const avgH = members.reduce((s, t) => s + t.h, 0) / members.length + NODE_SEP;
+      const guess = Math.ceil(members.length / Math.max(1, Math.sqrt(ASPECT * avgH * members.length / avgW)));
+      let best = null;
+      for (const cap of [...new Set([guess + 1, guess, guess - 1, guess - 2, Math.ceil(guess * 0.6), Math.ceil(guess * 0.45)])]) {
+        if (cap < 2 && best) continue;
+        const tried = arrange(members, es, Math.max(2, cap));
+        const off = Math.abs(Math.log(tried.w / tried.h / ASPECT)) + crossings(tried.at, members, es) / Math.max(es.length, 1) * 0.6;
+        if (!best || off < best.off - 0.05) best = { ...tried, off };
+      }
+      members.forEach(t => { t.x = best.at[norm(t.name)].x; t.y = best.at[norm(t.name)].y; });
+      best.routes.forEach((route, e) => { e.route = route; });
       const x0 = Math.min(...members.map(t => t.x)), y0 = Math.min(...members.map(t => t.y));
-      members.forEach(t => { t.x -= x0; t.y -= y0; });
+      shift(members, es, -x0, -y0);
       return { members, w: Math.max(...members.map(t => t.x + t.w)), h: Math.max(...members.map(t => t.y + t.h)) };
-    }).sort((a, b) => b.h - a.h || b.w - a.w);
-    const area = boxes.reduce((s, b) => s + (b.w + GAP_X) * (b.h + GAP_Y), 0);
-    const limit = Math.max(Math.sqrt(area * 1.6), ...boxes.map(b => b.w));
-    let x = 0, y = 0, rowH = 0, width = 0;
-    boxes.forEach(b => {
-      if (x > 0 && x + b.w > limit) { x = 0; y += rowH + GAP_X; rowH = 0; }
-      b.members.forEach(t => { t.x += x; t.y += y; });
-      width = Math.max(width, x + b.w);
-      rowH = Math.max(rowH, b.h);
-      x += b.w + GAP_X;
     });
-    return { width: Math.max(width, 1), height: Math.max(y + rowH, 1) };
+    // the groups: the biggest first, in rows; the tables without links last, in a grid of their own
+    const linked = boxes.filter(b => b.members.length > 1).sort((a, b) => b.members.length - a.members.length || b.h - a.h);
+    const alone = boxes.filter(b => b.members.length === 1).sort((a, b) => a.members[0].name.localeCompare(b.members[0].name));
+    // rows of groups as wide as limit; a few limits are tried, the one giving the shape nearest to a screen wins
+    const pack = (limit, move) => {
+      let x = 0, y = 0, rowH = 0, width = 0;
+      const put = (list, gap) => list.forEach(b => {
+        if (x > 0 && x + b.w > limit) { x = 0; y += rowH + gap; rowH = 0; }
+        if (move) shift(b.members, es, x, y);
+        width = Math.max(width, x + b.w);
+        rowH = Math.max(rowH, b.h);
+        x += b.w + gap;
+      });
+      put(linked, GAP_X);
+      if (alone.length) {
+        if (linked.length) { x = 0; y += rowH + GAP_X; rowH = 0; }
+        put(alone, GAP_Y + 8);
+      }
+      return { width: Math.max(width, 1), height: Math.max(y + rowH, 1) };
+    };
+    const area = boxes.reduce((s, b) => s + (b.w + GAP_X) * (b.h + GAP_Y), 0);
+    const widest = Math.max(...boxes.map(b => b.w));
+    const limits = [Math.sqrt(area * ASPECT)];
+    linked.reduce((x, b) => { limits.push(x + b.w); return x + b.w + GAP_X; }, 0);
+    let best = null;
+    for (const limit of limits.map(l => Math.max(l, widest))) {
+      const size = pack(limit, false);
+      const off = Math.abs(Math.log(size.width / size.height / ASPECT));
+      if (!best || off < best.off - 0.02) best = { limit, off };
+    }
+    return pack(best.limit, true);
   }
 
   function rowY(t, column) {
@@ -189,7 +354,17 @@ const MiniER = (() => {
     const p = byName[e.parent], c = byName[e.child];
     const y1 = rowY(p, e.pcol), y2 = rowY(c, e.ccol);
     let d;
-    if (p === c) {                                       // self reference: loop on the right side
+    const curve = (ax, ay, bx, by) => { const m = (bx - ax) / 2; return `C${ax + m},${ay} ${bx - m},${by} ${bx},${by}`; };
+    if (e.route && e.route.length && p.x + p.w < e.route[0][0] && e.route[e.route.length - 1][1] < c.x) {
+      // through the columns between the two tables, in the gaps between their tables
+      let x = p.x + p.w, y = y1;
+      d = `M${x},${y}`;
+      for (const [a, b, ry] of e.route) {
+        d += ` ${curve(x, y, a, ry)} L${b},${ry}`;
+        x = b; y = ry;
+      }
+      d += ` ${curve(x, y, c.x, y2)}`;
+    } else if (p === c) {                                       // self reference: loop on the right side
       const x = p.x + p.w;
       d = `M${x},${y1} C${x + 40},${y1} ${x + 40},${y2} ${x},${y2}`;
     } else if (p.x + p.w <= c.x) {                        // parent left of child
@@ -247,16 +422,19 @@ const MiniER = (() => {
     }) };
   }
 
-  /** Places the tables at the saved positions ({name: {x, y}}); the ones without a position go below. */
-  function place(tables, es, positions) {
+  /** Places the tables at the saved positions ({name: {x, y}}) and the lines on the saved routes ({edge key: route
+   *  or null}); the tables without a position are laid out below. */
+  function place(tables, es, positions, routes = {}) {
     const missing = tables.filter(t => !positions[norm(t.name)]);
+    const out = new Set(missing.map(t => norm(t.name)));
     let size = { width: 0, height: 0 };
-    if (missing.length) size = graphLayout(missing, es.filter(e => missing.some(t => norm(t.name) === e.parent) && missing.some(t => norm(t.name) === e.child)));
+    if (missing.length) size = graphLayout(missing, es.filter(e => out.has(e.parent) && out.has(e.child)));
+    es.forEach(e => { if (!out.has(e.parent) && !out.has(e.child) && routes[edgeKey(e)]) e.route = routes[edgeKey(e)]; });
     const placed = tables.filter(t => positions[norm(t.name)]);
     placed.forEach(t => { t.x = positions[norm(t.name)].x; t.y = positions[norm(t.name)].y; });
     if (placed.length && missing.length) {
       const bottom = Math.max(...placed.map(t => t.y + t.h)) + GAP_X, left = Math.min(...placed.map(t => t.x));
-      missing.forEach(t => { t.x += left; t.y += bottom; });
+      shift(missing, es, left, bottom);
     }
     return bounds(tables, size);
   }
@@ -274,11 +452,11 @@ const MiniER = (() => {
     const tables = (er.tables || []).map(t => ({ ...t, columns: t.columns || [] }));
     if (!tables.length) {
       container.innerHTML = `<div class="placeholder">${opts.empty || "No tables in this statement."}</div>`;
-      return { reset() {}, positions: () => ({}), select() {} };
+      return { reset() {}, positions: () => ({}), routes: () => ({}), select() {} };
     }
     tables.forEach(measure);
     const es = edges({ ...er, tables });
-    if (opts.positions) place(tables, es, opts.positions);
+    if (opts.positions) place(tables, es, opts.positions, opts.routes || {});
     else if (opts.graph) graphLayout(tables, es);
     else layout(tables, es);
     const byName = Object.fromEntries(tables.map(t => [norm(t.name), t]));
@@ -358,7 +536,11 @@ const MiniER = (() => {
         t.x = drag.tx + (ev.clientX - drag.x) * scale;
         t.y = drag.ty + (ev.clientY - drag.y) * scale;
         groups[k].setAttribute("transform", `translate(${t.x},${t.y})`);
-        es.forEach((e, i) => { if (e.parent === k || e.child === k) paths[i].setAttribute("d", edgePath(e, byName)); });
+        es.forEach((e, i) => {
+          if (e.parent !== k && e.child !== k) return;
+          delete e.route;                                    // the route went between the tables where they were
+          paths[i].setAttribute("d", edgePath(e, byName));
+        });
         return;
       }
       vb = { ...vb, x: drag.vb.x - (ev.clientX - drag.x) * scale, y: drag.vb.y - (ev.clientY - drag.y) * scale };
@@ -378,6 +560,8 @@ const MiniER = (() => {
     return {
       reset: () => { vb = fitBox(); apply(); },
       positions: () => Object.fromEntries(tables.map(t => [norm(t.name), { x: t.x, y: t.y }])),
+      // {edge key: route, or null for a line whose route was lost moving a table}: for render and toSvg with positions
+      routes: () => Object.fromEntries(es.map(e => [edgeKey(e), e.route || null])),
       select,
       // centres the view on a table, at a readable zoom
       focus(name) {
@@ -421,15 +605,15 @@ const MiniER = (() => {
                   ["possible", "possible (column name points to the table)"], ["observed", "join in the log, not in the schema"]];
 
   /** {svg: text of a standalone .svg file, width, height}: title, diagram and legend. */
-  function toSvg(er, { title = "", subtitle = "", graph = true, positions = null } = {}) {
+  function toSvg(er, { title = "", subtitle = "", graph = true, positions = null, routes = {} } = {}) {
     const tables = (er.tables || []).map(t => ({ ...t, columns: t.columns || [] }));
     tables.forEach(measure);
     const es = edges({ ...er, tables });
-    if (positions) place(tables, es, positions);
+    if (positions) place(tables, es, positions, routes);
     else if (graph) graphLayout(tables, es);
     else layout(tables, es);
     const b = bounds(tables);
-    tables.forEach(t => { t.x -= b.x; t.y -= b.y; });
+    shift(tables, es, -b.x, -b.y);
     const size = { width: b.width, height: b.height };
     const byName = Object.fromEntries(tables.map(t => [norm(t.name), t]));
     const margin = 30, top = margin + 52, legendH = 56;

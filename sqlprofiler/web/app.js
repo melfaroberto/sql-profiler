@@ -1294,6 +1294,7 @@ const ervState = {
   cols: "used", kinds: new Set(["declared", "inferred", "possible", "observed"]), isolated: true,
   hidden: new Set(),       // tables hidden by the user (lower case)
   positions: {},           // per source: where the tables are, once the user moved one
+  routes: {},              // per source, with positions: the routes of the lines between the tables (MiniER routes())
   board: null, selected: null, loading: 0,
 };
 const lc = s => String(s || "").toLowerCase();
@@ -1411,12 +1412,17 @@ function ervDraw() {
   const key = d.source;
   const view = ervView();
   const moved = ervState.positions[key];
-  if (moved && ervState.board) Object.assign(moved, ervState.board.positions());
+  if (moved && ervState.board) {
+    Object.assign(moved, ervState.board.positions());
+    Object.assign(ervState.routes[key], ervState.board.routes());
+  }
   ervState.board = MiniER.render($("erv-canvas"), view, {
-    graph: true, interactive: true, positions: moved || null,
+    graph: true, interactive: true, positions: moved || null, routes: moved ? ervState.routes[key] : null,
     empty: d.er.tables.length ? "No table to show with these filters." : "No tables used yet.",
     onSelect: name => { ervState.selected = name ? lc(name) : null; ervRenderDetail(); ervMarkList(); },
-    onMove: () => { ervState.positions[key] = ervState.positions[key] || {}; },
+    onMove: () => {
+      if (!ervState.positions[key]) { ervState.positions[key] = {}; ervState.routes[key] = {}; }
+    },
   });
   const nLinks = new Set(view.links.map(l => `${lc(l.from)}|${l.from_cols.join(",")}|${lc(l.to)}`)).size;
   $("erv-stats").innerHTML = `<b>${view.tables.length}</b> of ${d.er.tables.length} tables · <b>${nLinks}</b> foreign keys` +
@@ -1493,7 +1499,8 @@ async function ervSave(ext) {
     const view = ervView();
     if (!view.tables.length) throw new Error("No table shown: nothing to save.");
     const image = MiniER.toSvg(view, { title: ervState.data.title,
-      subtitle: `${ervState.data.subtitle} · ${view.tables.length} tables shown`, positions: ervState.board.positions() });
+      subtitle: `${ervState.data.subtitle} · ${view.tables.length} tables shown`, positions: ervState.board.positions(),
+      routes: ervState.board.routes() });
     saveBlob(ext === "svg" ? new Blob([image.svg], { type: "image/svg+xml" }) : await MiniER.toPng(image), ervFile(ext));
   } catch (err) {
     $("erv-error").textContent = err.message;
