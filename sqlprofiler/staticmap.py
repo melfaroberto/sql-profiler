@@ -11,6 +11,8 @@ from pathlib import Path
 from .analyzer import QueryAnalyzer, _fallback_fingerprint, first_keyword
 from .fkinfer import add_inferred_links
 from .schema import from_ddl_files, norm, open_text
+from .suggest import suggest
+from .tablekeys import analyse_keys
 
 OPERATIONS = ("select", "insert", "update", "delete")
 _WRITE_OP = {"INSERT": "insert", "REPLACE": "insert", "UPDATE": "update", "MERGE": "update", "DELETE": "delete",
@@ -666,10 +668,11 @@ def _table_result(name, info, catalog):
         usage = sorted(set(all_usage) | (u["usage"] if u else set()))
         columns.append(with_values({"name": c["name"], "type": c.get("type", ""), "pk": bool(c.get("pk")), "fk": bool(c.get("fk")),
                                     "usage": usage, "whole_table": bool(all_usage), "queries": u["queries"] if u else 0,
-                                    "in_dump": True}, norm(c["name"])))
+                                    "named": sorted(u["usage"]) if u else [], "in_dump": True}, norm(c["name"])))
     for key, u in used.items():
         columns.append(with_values({"name": u["name"], "type": "", "pk": False, "fk": False, "usage": sorted(u["usage"]),
-                                    "whole_table": False, "queries": u["queries"], "in_dump": False}, key))
+                                    "whole_table": False, "queries": u["queries"], "named": sorted(u["usage"]),
+                                    "in_dump": False}, key))
     examples = sorted(info["examples"].values(), key=lambda e: -e["count"])
     variants = [{"executions": v["executions"], "more": v["more"], "rows": list(v["rows"].values())}
                 for v in sorted(info.get("variants", {}).values(), key=lambda v: -v["executions"]) if v["rows"]]
@@ -742,7 +745,13 @@ def analyse(dump_folder, log_file, dialect="mysql"):
         problems.append(f"Tables used in the log but not in the dump: {', '.join(missing)}.")
     seen = {norm(n) for n in used_names}
     unused = sorted((t["name"] for t in catalog.tables.values() if norm(t["name"]) not in seen), key=str.lower)
-    return {"groups": groups, "er": er, "problems": problems, "unused": unused, "log": log_path.name, "summary": {
+    keys = analyse_keys(catalog, used_names)
+    suggestions = suggest(groups, catalog, used_names, unused, keys, calls=sorted(totals.calls.values()))
+    return {"groups": groups, "er": er, "problems": problems, "unused": unused, "log": log_path.name, "keys": keys,
+            "suggestions": suggestions,
+            # for the files made afterwards (CREATE script, dump of the tables used); not sent to the browser
+            "_context": {"catalog": catalog, "files": files, "dump": dump_folder},
+            "summary": {
         "rows": info["rows"], "statements": totals.statements, "first": info["first"], "last": info["last"],
         "ignored": info["ignored"], "other_types": totals.other_types, "tables": len(used_names),
         "dump_tables": len(catalog.tables), "dump_files": len(files),
@@ -765,4 +774,5 @@ def _diagram(totals, catalog):
         "joins": [dict(j, in_schema=catalog.has_link(j["left_table"], j["left_column"], j["right_table"], j["right_column"]))
                   for j in totals.joins.values()],
     }
-    return totals.analyzer.er_subgraph(analysis)
+    # every column: the diagram of the page shows keys and used ones, the ER diagram section can show them all
+    return totals.analyzer.er_subgraph(analysis, full=True)

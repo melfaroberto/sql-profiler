@@ -384,6 +384,7 @@ async function loadSessions() {
   setRecording(data.recording);
   renderSessions();
   renderSessionHead();
+  if (!$("er-view").hidden) openErView();          // the sessions are sources of the ER diagram section
 }
 
 function renderSessions() {
@@ -909,11 +910,15 @@ function renderSql() {
 // ====================================================================== sections: live session / static analysis
 
 function setMode(mode, remember = true) {
+  if (!["live", "static", "er"].includes(mode)) mode = "live";
   document.body.classList.toggle("mode-static", mode === "static");
+  document.body.classList.toggle("mode-er", mode === "er");
   $("static-view").hidden = mode !== "static";
+  $("er-view").hidden = mode !== "er";
   document.querySelectorAll("#mode-menu button").forEach(b => b.classList.toggle("on", b.dataset.modeTo === mode));
   if (remember) try { localStorage.setItem("sql-profiler-mode", mode); } catch { /* only a convenience */ }
   if (mode === "static" && staticState.result) drawStaticDiagram();      // a hidden box has no size to fit into
+  if (mode === "er") openErView();
 }
 
 // ====================================================================== static analysis
@@ -944,6 +949,7 @@ async function runStatic(e) {
     staticState.result = await api("/api/static", { method: "POST",
       body: { dump: $("static-dump").value.trim(), log: $("static-log").value.trim() } });
     staticState.variant = {};
+    if (ervState.source === "static") ervState.data = null;          // the ER diagram section reads it again
     renderStatic();
   } catch (err) {
     staticState.result = null;
@@ -976,6 +982,8 @@ function renderStatic() {
   $("static-problems").textContent = r.problems.join("\n");
   $("static-problems").hidden = !r.problems.length;
   renderStaticGroups();
+  renderStaticKeys();
+  renderSuggestions();
   $("static-unused-title").textContent = `Tables of the dump never used by the log (${r.unused.length})`;
   $("static-unused").innerHTML = r.unused.map(n => `<li>${esc(n)}</li>`).join("");
   $("static-unused-box").hidden = !r.unused.length;
@@ -1115,13 +1123,13 @@ function saveStaticTables() {
 
 function drawStaticDiagram() {
   if (!$("static-view").hidden && staticState.result) {
-    staticState.view = MiniER.render($("static-canvas"), staticState.result.er, { graph: true });
+    staticState.view = MiniER.render($("static-canvas"), MiniER.compact(staticState.result.er), { graph: true });
   }
 }
 
 function staticImage() {
   const r = staticState.result, s = r.summary;
-  return MiniER.toSvg(r.er, { title: `Tables used in ${r.log}`,
+  return MiniER.toSvg(MiniER.compact(r.er), { title: `Tables used in ${r.log}`,
     subtitle: `${s.tables} tables · SELECT ${s.counts.select} · INSERT ${s.counts.insert} · UPDATE ${s.counts.update} · DELETE ${s.counts.delete} · ${s.statements} statements` });
 }
 
@@ -1163,7 +1171,391 @@ function saveStaticCsv() {
   saveBlob(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv" }), staticName("csv"));     // BOM: for Excel
 }
 
+// ---------------------------------------------------------------------- keys, areas, suggestions
+
+const fkText = f => `${f.from_cols.join(", ")} → ${f.to}${f.to_cols.length ? ` (${f.to_cols.join(", ")})` : ""}`;
+const KIND_LABEL = { "declared": "declared", "inferred-high": "inferred · high", "inferred-medium": "inferred · medium: to check" };
+
+function fkNotes(f) {
+  return [KIND_LABEL[f.kind] || f.kind, f.relation, f.mandatory ? "mandatory" : "optional",
+    !f.target_in_dump ? "table not in the dump" : !f.types_ok ? `types ${f.types}` : "",
+    f.target_in_dump && !f.target_used ? "table not used by the log" : "",
+    f.redundant ? `redundant: ${f.redundant}` : ""].filter(Boolean).join(" · ");
+}
+
+function renderStaticKeys() {
+  const k = staticState.result.keys, s = k.summary;
+  $("static-keys-stats").innerHTML = [
+    [`${s.with_pk}/${s.tables}`, "with a primary key"], [s.declared, "FK declared"], [s.inferred_high, "FK inferred (high)"],
+    [s.inferred_medium, "FK to check (medium)", s.inferred_medium], [s.one_to_many, "relations 1:N"], [s.one_to_one, "relations 1:1"],
+    [s.bridges, "N:M (bridge tables)"], [s.areas, "areas"],
+  ].map(([n, label, warn]) => `<div${warn ? ' class="warn"' : ""}><b>${n}</b><span>${esc(label)}</span></div>`).join("");
+  const pick = $("static-area"), was = pick.value;
+  pick.innerHTML = `<option value="">all the ${s.tables} used</option>` + k.areas.map(a =>
+    `<option value="${esc(a.area)}">area ${esc(a.area)} (${a.tables.length})</option>`).join("");
+  if ([...pick.options].some(o => o.value === was)) pick.value = was;
+  renderStaticAreas();
+  $("static-fks-title").textContent = `Foreign keys of the tables used (${k.fks.length})`;
+  $("static-fks").innerHTML = `<tr><th>table</th><th>attributes</th><th>→ table</th><th>kind</th><th>relation</th><th>notes</th></tr>` +
+    k.fks.map(f => `<tr class="${f.kind === "inferred-medium" || !f.types_ok ? "fk-check" : ""}"><td>${esc(f.from)}</td><td>${esc(f.from_cols.join(", "))}</td>
+      <td>${esc(f.to)}${f.to_cols.length ? ` <span class="muted">(${esc(f.to_cols.join(", "))})</span>` : ""}</td><td>${esc(KIND_LABEL[f.kind] || f.kind)}</td>
+      <td>${esc(f.relation)} ${f.mandatory ? "mandatory" : "optional"}</td>
+      <td>${esc(fkNotes(f).split(" · ").slice(3).join(" · "))}</td></tr>`).join("");
+  $("static-fks-box").hidden = !k.fks.length;
+  $("static-nopk-title").textContent = `Tables without a declared primary key (${k.no_pk.length})`;
+  $("static-nopk").innerHTML = `<tr><th>table</th><th>guessed key</th><th>suggestion</th></tr>` +
+    k.no_pk.map(r => `<tr><td>${esc(r.table)}</td><td>${esc(r.guessed || "-")}</td><td>${esc(r.suggestion)}</td></tr>`).join("");
+  $("static-nopk-box").hidden = !k.no_pk.length;
+}
+
+function renderStaticAreas() {
+  const k = staticState.result.keys, f = $("static-keys-filter").value.trim().toLowerCase();
+  const byTable = Object.fromEntries(k.tables.map(t => [t.table, t]));
+  const hints = {};
+  for (const x of staticState.result.suggestions || []) (hints[x.table] = hints[x.table] || []).push(x);
+  const row = name => {
+    const t = byTable[name];
+    const fks = t.fk_out.map(x => `<li class="${x.kind === "inferred-medium" || !x.types_ok ? "fk-check" : ""}" title="${esc(fkNotes(x))}">
+        <span class="fk-arrow">${esc(fkText(x))}</span> <span class="muted">${esc(KIND_LABEL[x.kind] || x.kind)} · ${esc(x.relation)}</span></li>`).join("");
+    const by = [...new Set(t.fk_in.map(x => x.from))];
+    const n = (hints[name] || []).filter(x => x.kind !== "unused_table").length;
+    return `<div class="area-table">
+      <div class="area-table-head"><b>${esc(name)}</b><span class="cat cat-${t.category}" title="${esc(k.categories[t.category])}">${esc(t.category)}</span>
+        ${t.central ? '<span class="cat cat-central" title="pointed to by many tables of different subgroups">central</span>' : ""}
+        ${n ? `<span class="muted" title="see the suggestions below">${n} suggestion${n === 1 ? "" : "s"}</span>` : ""}</div>
+      <div class="area-pk">PK <span class="mono">${esc(t.pk.join(", ") || "none")}</span>${t.pk_guessed ? ' <span class="fk-check">guessed, not declared</span>' : ""}
+        ${by.length ? ` · pointed to by <span class="mono">${esc(by.join(", "))}</span>` : ""}</div>
+      ${fks ? `<ul class="area-fks">${fks}</ul>` : ""}</div>`;
+  };
+  $("static-areas").innerHTML = k.areas.map((a, i) => {
+    const groups = a.subgroups.map(g => ({ ...g, tables: g.tables.filter(t => !f || t.toLowerCase().includes(f)) })).filter(g => g.tables.length);
+    if (!groups.length) return "";
+    const cats = Object.entries(a.categories).map(([c, n]) => `<span class="cat cat-${c}">${esc(c)} ${n}</span>`).join("");
+    return `<details class="area-card"${i < 3 || f ? " open" : ""}><summary><b>${esc(a.area)}</b>
+        <span class="muted">${a.tables.length} table${a.tables.length === 1 ? "" : "s"} · ${a.subgroups.length} subgroup${a.subgroups.length === 1 ? "" : "s"}</span>${cats}
+        ${a.linked_to.length ? `<span class="muted">linked to: ${esc(a.linked_to.join(", "))}</span>` : ""}</summary>
+      ${groups.map(g => `<div class="area-sub"><div class="area-sub-title">${esc(g.subgroup)}</div>
+        <div class="area-tables">${g.tables.map(row).join("")}</div></div>`).join("")}</details>`;
+  }).join("") || `<p class="none">No match.</p>`;
+}
+
+const SUG_KINDS = {
+  unused_table: "Tables never used by the log", unused_columns: "Attributes never used", write_only: "Attributes written but never read",
+  write_only_table: "Tables only written, never read", constant: "Attributes always written with the same value",
+  same_values: "Attributes that always receive the same value", copied_column: "Attributes copied from a linked table",
+  repeated_group: "Repeated groups of attributes", similar_tables: "Tables with the same structure", redundant_link: "Redundant links",
+};
+const LEVELS = { high: 0, medium: 1, low: 2 };
+
+function renderSuggestions() {
+  const all = staticState.result.suggestions || [], max = LEVELS[$("static-sug-level").value];
+  const shown = all.filter(x => LEVELS[x.confidence] <= max);
+  const families = { irrelevant: "Irrelevant", repetitive: "Repetitive" };
+  $("static-suggestions").innerHTML = Object.entries(families).map(([fam, label]) => {
+    const kinds = Object.keys(SUG_KINDS).filter(kind => shown.some(x => x.kind === kind && x.family === fam));
+    if (!kinds.length) return "";
+    return `<div class="sug-family"><h4>${label}</h4>${kinds.map(kind => {
+      const items = shown.filter(x => x.kind === kind);
+      return `<details class="static-card static-fold"${items.length <= 8 ? " open" : ""}><summary>${esc(SUG_KINDS[kind])} <span class="muted">(${items.length})</span></summary>
+        <ul class="sug-list">${items.map(x => `<li><span class="lvl lvl-${x.confidence}">${x.confidence}</span>
+          <b class="mono">${esc(x.table)}</b>${x.columns.length ? ` <span class="mono sug-cols">${esc(x.columns.join(", "))}</span>` : ""}
+          <div class="muted">${esc(x.reason)}</div></li>`).join("")}</ul></details>`;
+    }).join("")}</div>`;
+  }).join("") || `<p class="none">${all.length ? "Nothing at this level of confidence: choose “all”." : "No suggestion."}</p>`;
+}
+
+async function saveStaticFile(kind) {
+  const area = $("static-area").value;
+  const url = `/api/static/export?kind=${kind}${area && (kind === "create" || kind === "dump") ? `&area=${encodeURIComponent(area)}` : ""}`;
+  $("static-error").hidden = true;
+  try {
+    if (kind === "dump") {                 // can be GB: straight to disk, not through the page's memory
+      await api("/api/static/export?kind=check");
+      download(url);
+      return;
+    }
+    const res = await fetch(url);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const name = (res.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+    saveBlob(await res.blob(), name ? name[1] : `static-${kind}`);
+  } catch (err) {
+    $("static-error").textContent = err.message;
+    $("static-error").hidden = false;
+  }
+}
+
+// ====================================================================== ER diagram section
+// The tables of the static analysis, of the whole profile or of one session, full screen: filters by area and by
+// kind of link, attributes shown, tables that can be moved, hidden and selected (a table and its neighbours).
+
+const ervState = {
+  source: null,            // "static" | "profile" | session id (as text)
+  data: null,              // {er, areas: [{area, tables}], title, subtitle}
+  cols: "used", kinds: new Set(["declared", "inferred", "possible", "observed"]), isolated: true,
+  hidden: new Set(),       // tables hidden by the user (lower case)
+  positions: {},           // per source: where the tables are, once the user moved one
+  board: null, selected: null, loading: 0,
+};
+const lc = s => String(s || "").toLowerCase();
+const KIND_OF_LINK = { declared: "declared", "inferred-media": "possible" };     // anything else: inferred
+const linkKind = l => KIND_OF_LINK[l.kind] || "inferred";
+
+function ervSources() {
+  const out = [];
+  if (staticState.result) out.push(["static", `Static analysis · ${staticState.result.log}`]);
+  out.push(["profile", `Whole profile${state.status && state.status.profile ? ` · ${state.status.profile}` : ""}`]);
+  const add = (sess, depth) => {
+    out.push([String(sess.id), `${"  ".repeat(depth + 1)}${depth ? "↳ " : ""}${sess.label}`]);
+    childrenOf(sess.id).forEach(c => add(c, depth + 1));
+  };
+  state.sessions.filter(x => !x.parent_id || !sessionById(x.parent_id)).forEach(x => add(x, 0));
+  return out;
+}
+
+function ervRenderSources() {
+  const list = ervSources();
+  if (!list.some(([v]) => v === ervState.source)) ervState.source = list[0][0];
+  $("erv-source").innerHTML = list.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join("");
+  $("erv-source").value = ervState.source;
+}
+
+/** Opens the section; source: the one to show (default: the one already chosen). */
+function openErView(source) {
+  if (source !== undefined) ervState.source = String(source);
+  ervRenderSources();
+  if (!ervState.data || ervState.data.source !== ervState.source) ervLoad();
+  else ervDraw();
+}
+
+// groups of tables linked to each other, when the source has no areas of its own
+function ervComponents(er) {
+  const parent = {};
+  const find = k => parent[k] === k ? k : (parent[k] = find(parent[k]));
+  er.tables.forEach(t => { parent[lc(t.name)] = lc(t.name); });
+  const join = (a, b) => { if (parent[a] && parent[b]) parent[find(a)] = find(b); };
+  (er.links || []).forEach(l => join(lc(l.from), lc(l.to)));
+  (er.observed || []).forEach(j => join(lc(j.left_table), lc(j.right_table)));
+  const groups = new Map();
+  er.tables.forEach(t => { const k = find(lc(t.name)); groups.set(k, [...(groups.get(k) || []), t.name]); });
+  return [...groups.values()].filter(g => g.length > 1).sort((a, b) => b.length - a.length)
+    .map((tables, i) => ({ area: `group ${i + 1} (${tables.length} tables, e.g. ${tables[0]})`, tables }));
+}
+
+async function ervLoad() {
+  const source = ervState.source, ticket = ++ervState.loading;
+  $("erv-error").hidden = true;
+  let data;
+  try {
+    if (source === "static") {
+      const r = staticState.result;
+      if (!r) throw new Error("Run the static analysis first.");
+      data = { er: r.er, areas: r.keys.areas.map(a => ({ area: `area ${a.area}`, tables: a.tables })), title: `Tables used in ${r.log}`,
+               subtitle: `${r.summary.tables} tables · ${r.summary.statements} statements${r.summary.first ? ` · from ${r.summary.first} to ${r.summary.last}` : ""}` };
+    } else {
+      $("erv-canvas").innerHTML = '<div class="placeholder">Reading the tables…</div>';
+      const er = await api(`/api/er?full=1${source === "profile" ? "" : `&session=${encodeURIComponent(source)}`}`);
+      const name = source === "profile" ? `profile ${state.status && state.status.profile || ""}`.trim() : `session “${pathLabel(Number(source))}”`;
+      data = { er, areas: ervComponents(er), title: `Tables used by the ${name}`, subtitle: `${er.tables.length} tables` };
+    }
+  } catch (err) {
+    if (ticket !== ervState.loading) return;
+    ervState.data = null;
+    $("erv-canvas").innerHTML = "";
+    $("erv-error").textContent = err.message;
+    $("erv-error").hidden = false;
+    ervDraw();
+    return;
+  }
+  if (ticket !== ervState.loading) return;          // another source was chosen meanwhile
+  data.source = source;
+  ervState.data = data;
+  ervState.hidden = new Set();
+  ervState.selected = null;
+  ervState.board = null;
+  const pick = $("erv-area");
+  pick.innerHTML = `<option value="">all (${data.er.tables.length} tables)</option>` +
+    data.areas.map((a, i) => `<option value="${i}">${esc(a.area)} · ${a.tables.length}</option>`).join("");
+  $("erv-area-block").hidden = !data.areas.length;
+  ervDraw();
+}
+
+/** What is drawn now: the tables shown, with the attributes and the links chosen. */
+function ervView() {
+  const d = ervState.data, er = d.er;
+  const area = $("erv-area").value === "" ? null : new Set(d.areas[Number($("erv-area").value)].tables.map(lc));
+  let names = new Set(er.tables.map(t => lc(t.name)).filter(n => !ervState.hidden.has(n) && (!area || area.has(n))));
+  const links = (er.links || []).filter(l => ervState.kinds.has(linkKind(l)) && names.has(lc(l.from)) && names.has(lc(l.to)));
+  const observed = ervState.kinds.has("observed")
+    ? (er.observed || []).filter(j => names.has(lc(j.left_table)) && names.has(lc(j.right_table))) : [];
+  if (!ervState.isolated) {
+    const linked = new Set();
+    links.forEach(l => { if (lc(l.from) !== lc(l.to)) { linked.add(lc(l.from)); linked.add(lc(l.to)); } });
+    observed.forEach(j => { if (lc(j.left_table) !== lc(j.right_table)) { linked.add(lc(j.left_table)); linked.add(lc(j.right_table)); } });
+    names = new Set([...names].filter(n => linked.has(n)));
+  }
+  let tables = er.tables.filter(t => names.has(lc(t.name)));
+  if (ervState.cols !== "all") {
+    const keep = c => c.pk || c.fk || (ervState.cols === "used" && c.used && c.used.length);
+    tables = tables.map(t => {
+      const shown = t.columns.filter(keep);
+      return { ...t, columns: shown, hidden: (t.hidden || 0) + t.columns.length - shown.length };
+    });
+  }
+  return { tables, links, observed };
+}
+
+function ervDraw() {
+  const d = ervState.data;
+  ervRenderList();
+  if (!d) { $("erv-stats").textContent = ""; $("erv-detail").hidden = true; return; }
+  const key = d.source;
+  const view = ervView();
+  const moved = ervState.positions[key];
+  if (moved && ervState.board) Object.assign(moved, ervState.board.positions());
+  ervState.board = MiniER.render($("erv-canvas"), view, {
+    graph: true, interactive: true, positions: moved || null,
+    empty: d.er.tables.length ? "No table to show with these filters." : "No tables used yet.",
+    onSelect: name => { ervState.selected = name ? lc(name) : null; ervRenderDetail(); ervMarkList(); },
+    onMove: () => { ervState.positions[key] = ervState.positions[key] || {}; },
+  });
+  const nLinks = new Set(view.links.map(l => `${lc(l.from)}|${l.from_cols.join(",")}|${lc(l.to)}`)).size;
+  $("erv-stats").innerHTML = `<b>${view.tables.length}</b> of ${d.er.tables.length} tables · <b>${nLinks}</b> foreign keys` +
+    (view.observed.length ? ` · <b>${view.observed.length}</b> joins only in the queries` : "");
+  if (ervState.selected && view.tables.some(t => lc(t.name) === ervState.selected)) ervState.board.select(ervState.selected);
+  else { ervState.selected = null; ervRenderDetail(); }
+}
+
+function ervRenderList() {
+  const d = ervState.data, f = lc($("erv-search").value.trim());
+  if (!d) { $("erv-list").innerHTML = ""; return; }
+  const degree = {};
+  for (const l of d.er.links || []) for (const n of [lc(l.from), lc(l.to)]) degree[n] = (degree[n] || 0) + 1;
+  const rows = d.er.tables.map(t => t.name).filter(n => !f || lc(n).includes(f)).sort((a, b) => a.localeCompare(b));
+  $("erv-list").innerHTML = rows.map(n => `<li data-t="${esc(lc(n))}" class="${ervState.hidden.has(lc(n)) ? "off" : ""}">
+      <input type="checkbox" ${ervState.hidden.has(lc(n)) ? "" : "checked"} title="Show or hide this table">
+      <span class="nm" title="Show it in the diagram">${esc(n)}</span><span class="n" title="foreign keys">${degree[lc(n)] || ""}</span></li>`).join("")
+    || `<li class="empty">No table.</li>`;
+  ervMarkList();
+}
+
+function ervMarkList() {
+  document.querySelectorAll("#erv-list li[data-t]").forEach(li => li.classList.toggle("sel", li.dataset.t === ervState.selected));
+}
+
+function ervRenderDetail() {
+  const box = $("erv-detail"), d = ervState.data, k = ervState.selected;
+  const t = d && k && d.er.tables.find(x => lc(x.name) === k);
+  if (!t) { box.hidden = true; return; }
+  const view = ervView();
+  const out = view.links.filter(l => lc(l.from) === k), inn = view.links.filter(l => lc(l.to) === k && lc(l.from) !== k);
+  const obs = view.observed.filter(j => lc(j.left_table) === k || lc(j.right_table) === k);
+  const area = d.areas.find(a => a.tables.some(n => lc(n) === k));
+  const link = n => `<a data-go="${esc(lc(n))}">${esc(n)}</a>`;
+  const kindLabel = l => ({ declared: "declared", inferred: "inferred", possible: "possible" }[linkKind(l)]);
+  box.innerHTML = `<h4>${esc(t.name)}<button class="small x" type="button" data-close title="Close">✕</button></h4>
+    <div class="sub">${t.columns.length + (t.hidden || 0)} attributes · PK ${esc(t.columns.filter(c => c.pk).map(c => c.name).join(", ") || "none")}
+      ${t.access ? ` · ${esc(t.access)}` : ""}${t.known ? "" : " · not in the schema"}${area ? `<br>${esc(area.area)}` : ""}</div>
+    ${out.length ? `<b>Points to</b><ul>${out.map(l => `<li>${esc(l.from_cols.join(", "))} → ${link(l.to)}<span class="kind"> · ${kindLabel(l)}</span></li>`).join("")}</ul>` : ""}
+    ${inn.length ? `<b>Pointed to by</b><ul>${inn.map(l => `<li>${link(l.from)} (${esc(l.from_cols.join(", "))})<span class="kind"> · ${kindLabel(l)}</span></li>`).join("")}</ul>` : ""}
+    ${obs.length ? `<b>Joins in the queries only</b><ul>${obs.map(j => {
+      const mine = lc(j.left_table) === k;
+      return `<li>${esc(mine ? j.left_column : j.right_column)} = ${link(mine ? j.right_table : j.left_table)}.${esc(mine ? j.right_column : j.left_column)}</li>`;
+    }).join("")}</ul>` : ""}
+    ${!out.length && !inn.length && !obs.length ? `<p class="muted">No link with the tables shown.</p>` : ""}
+    <div class="acts"><button class="small" type="button" data-only title="Hide every table not linked to this one">Only this and its links</button>
+      <button class="small" type="button" data-hide>Hide this table</button></div>`;
+  box.hidden = false;
+}
+
+function ervFocus(name) {
+  if (ervState.hidden.has(name)) { ervState.hidden.delete(name); ervDraw(); }
+  if (ervState.board) ervState.board.focus(name);
+}
+
+function ervOnlyNeighbours() {
+  const k = ervState.selected, er = ervState.data.er;
+  const keep = new Set([k]);
+  (er.links || []).forEach(l => { if (lc(l.from) === k) keep.add(lc(l.to)); if (lc(l.to) === k) keep.add(lc(l.from)); });
+  (er.observed || []).forEach(j => { if (lc(j.left_table) === k) keep.add(lc(j.right_table)); if (lc(j.right_table) === k) keep.add(lc(j.left_table)); });
+  ervState.hidden = new Set(er.tables.map(t => lc(t.name)).filter(n => !keep.has(n)));
+  $("erv-area").value = "";
+  delete ervState.positions[ervState.data.source];       // a new, compact arrangement
+  ervState.board = null;
+  ervDraw();
+  if (ervState.board) ervState.board.reset();
+}
+
+const ervFile = ext => `er-${lc(ervState.data.title).replace(/[^\w.-]+/g, "-").replace(/^-|-$/g, "") || "diagram"}.${ext}`;
+
+async function ervSave(ext) {
+  if (!ervState.data || !ervState.board) return;
+  try {
+    const view = ervView();
+    if (!view.tables.length) throw new Error("No table shown: nothing to save.");
+    const image = MiniER.toSvg(view, { title: ervState.data.title,
+      subtitle: `${ervState.data.subtitle} · ${view.tables.length} tables shown`, positions: ervState.board.positions() });
+    saveBlob(ext === "svg" ? new Blob([image.svg], { type: "image/svg+xml" }) : await MiniER.toPng(image), ervFile(ext));
+  } catch (err) {
+    $("erv-error").textContent = err.message;
+    $("erv-error").hidden = false;
+  }
+}
+
+function bindErView() {
+  $("erv-source").addEventListener("change", () => { ervState.source = $("erv-source").value; ervLoad(); });
+  $("erv-reload").onclick = () => ervLoad();
+  $("erv-cols").addEventListener("click", e => {
+    const b = e.target.closest("[data-cols]");
+    if (!b) return;
+    ervState.cols = b.dataset.cols;
+    document.querySelectorAll("#erv-cols button").forEach(x => x.classList.toggle("on", x === b));
+    if (ervState.data) { delete ervState.positions[ervState.data.source]; ervState.board = null; }   // the boxes change size
+    ervDraw();
+  });
+  document.querySelectorAll("#er-view [data-kind]").forEach(c => c.addEventListener("change", () => {
+    if (c.checked) ervState.kinds.add(c.dataset.kind); else ervState.kinds.delete(c.dataset.kind);
+    ervDraw();
+  }));
+  $("erv-isolated").addEventListener("change", () => { ervState.isolated = $("erv-isolated").checked; ervDraw(); });
+  $("erv-area").addEventListener("change", () => {
+    if (ervState.data) { delete ervState.positions[ervState.data.source]; ervState.board = null; }
+    ervDraw();
+  });
+  $("erv-search").addEventListener("input", ervRenderList);
+  $("erv-search").addEventListener("keydown", e => {
+    const first = document.querySelector("#erv-list li[data-t]");
+    if (e.key === "Enter" && first) ervFocus(first.dataset.t);
+  });
+  $("erv-list").addEventListener("click", e => {
+    const li = e.target.closest("li[data-t]");
+    if (!li) return;
+    if (e.target.matches("input[type=checkbox]")) {
+      if (e.target.checked) ervState.hidden.delete(li.dataset.t); else ervState.hidden.add(li.dataset.t);
+      ervDraw();
+    } else if (e.target.closest(".nm")) ervFocus(li.dataset.t);
+  });
+  $("erv-all").onclick = () => { ervState.hidden.clear(); ervDraw(); };
+  $("erv-none").onclick = () => { if (ervState.data) ervState.hidden = new Set(ervState.data.er.tables.map(t => lc(t.name))); ervDraw(); };
+  $("erv-fit").onclick = () => { if (ervState.board) ervState.board.reset(); };
+  $("erv-relayout").onclick = () => { if (ervState.data) delete ervState.positions[ervState.data.source]; ervState.board = null; ervDraw(); };
+  $("erv-png").onclick = () => ervSave("png");
+  $("erv-svg").onclick = () => ervSave("svg");
+  $("erv-detail").addEventListener("click", e => {
+    if (e.target.closest("[data-close]")) { if (ervState.board) ervState.board.select(null); return; }
+    if (e.target.closest("[data-only]")) { ervOnlyNeighbours(); return; }
+    if (e.target.closest("[data-hide]")) { ervState.hidden.add(ervState.selected); ervState.selected = null; ervDraw(); return; }
+    const go = e.target.closest("[data-go]");
+    if (go) ervFocus(go.dataset.go);
+  });
+  $("static-er-open").onclick = () => { ervState.source = "static"; ervState.data = null; setMode("er"); };
+  $("session-er").onclick = () => { if (typeof state.view === "number") { ervState.source = String(state.view); setMode("er"); } };
+  window.addEventListener("resize", () => { if (!$("er-view").hidden && ervState.board) ervState.board.reset(); });
+}
+
 function bindStatic() {
+  document.querySelectorAll("[data-sx]").forEach(b => { b.onclick = () => saveStaticFile(b.dataset.sx); });
+  $("static-keys-filter").addEventListener("input", renderStaticAreas);
+  $("static-sug-level").addEventListener("change", renderSuggestions);
   $("mode-menu").addEventListener("click", e => { const b = e.target.closest("[data-mode-to]"); if (b) setMode(b.dataset.modeTo); });
   $("static-form").addEventListener("submit", runStatic);
   $("static-filter").addEventListener("input", renderStaticGroups);
@@ -1173,6 +1565,7 @@ function bindStatic() {
   $("static-csv").onclick = saveStaticCsv;
   $("static-tables-svg").onclick = saveStaticTables;
   $("static-queries").onclick = toggleStaticQueries;
+  bindErView();
   staticPaths(false);
   let saved = "live";
   try { saved = localStorage.getItem("sql-profiler-mode") || "live"; } catch { /* only a convenience */ }

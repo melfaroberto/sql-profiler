@@ -123,6 +123,98 @@ Diagramma
     arancione a puntini   JOIN presente nel log ma non nel dump
   Le regole di deduzione sono quelle di SQL FK Finder, rese più prudenti: i nomi generici
   (codice, nome, ...) non creano collegamenti e i tipi devono essere compatibili.
+  "⤢ ER diagram" apre lo stesso diagramma nella sezione "ER diagram" (vedi sotto), a tutto
+  schermo, con filtri, aree e tabelle spostabili.
+
+Sezione "ER diagram" (in alto, accanto a "Static analysis")
+  Il diagramma ER delle tabelle usate, a tutta pagina. In "Tables of" si sceglie da dove
+  prenderle: l'analisi statica appena fatta, tutto il profilo o una sessione registrata.
+    - Attributes: solo le chiavi, chiavi + attributi usati, oppure tutti gli attributi;
+    - Links: quali collegamenti mostrare (dichiarati, dedotti, possibili, JOIN solo nel log);
+      "Tables without links" toglie le tabelle isolate;
+    - Area: solo le tabelle di un'area (per una sessione: di un gruppo di tabelle collegate);
+    - l'elenco delle tabelle: la casella mostra o nasconde la tabella, il nome la trova
+      nel diagramma (anche scrivendo nella ricerca e premendo Invio).
+  Cliccando una tabella si evidenziano lei e le tabelle collegate; il riquadro in basso
+  a destra dice a chi punta e da chi è puntata, con "Only this and its links" per vedere
+  solo quelle. Le tabelle si trascinano dove si vuole; "Re-arrange" le ridispone.
+  Le estremità delle linee seguono la notazione "a zampa di gallina":
+    ||   esattamente uno (la chiave esterna è NOT NULL)
+    o|   zero o uno (la chiave esterna ammette NULL)
+    <    molti; una sbarra al posto della zampa = 1:1 (chiave unica o intera chiave primaria)
+  ".png" / ".svg" salvano il diagramma come è sullo schermo: tabelle mostrate e posizioni.
+
+Chiavi e aree delle tabelle usate
+  L'analisi di SQL FK Finder, fatta solo sulle tabelle che il log usa:
+    - in alto i numeri: tabelle con chiave primaria, chiavi esterne dichiarate, dedotte
+      ad affidabilità alta e media (da controllare), relazioni 1:N, 1:1, N:M, aree;
+    - le AREE: gruppi di tabelle molto collegate tra loro dalle chiavi esterne
+      (dichiarate e dedotte ad affidabilità alta). Dentro ogni area i SOTTOGRUPPI:
+      tabelle con nomi simili (ordini, ordini_righe, tbl_ordine). Le tabelle "centrali",
+      puntate da moltissime altre, contano poco nella divisione, così non uniscono tutto
+      in un'area sola. "(no links)" raccoglie le tabelle senza collegamenti;
+    - per ogni tabella: la CATEGORIA (lookup = codifica, master = anagrafica,
+      transaction = movimento, detail = dettaglio, bridge = ponte N:M, history = storico,
+      dependent = dipendente, isolated = isolata), la chiave primaria ("guessed" se il
+      dump non la dichiara e viene indovinata), le tabelle che la puntano e le sue chiavi
+      esterne, ognuna con tipo (declared / inferred high / inferred medium) e relazione.
+      In viola le chiavi da controllare (affidabilità media o tipi diversi);
+    - "Foreign keys of the tables used": l'elenco completo, con le note (tipi diversi,
+      tabella puntata non usata dal log, relazione ridondante X -> Z quando c'è già
+      X -> Y -> Z);
+    - "Tables without a declared primary key", con la chiave proposta.
+  Il campo "Filter tables…" cerca le tabelle dentro le aree.
+
+Suggerimenti: irrelevant or repetitive
+  Un algoritmo che incrocia il log e il dump e segnala, con il motivo e un livello di
+  affidabilità (high / medium / low, che dipende anche da quante esecuzioni ha il log):
+  Irrilevanti
+    - tabelle mai usate dal log (più sicure se hanno un nome da copia: _bak, _old, tmp,
+      test, una data... o se non sono collegate a nulla; meno sicure se sono collegate
+      a tabelle usate o se il log chiama stored procedure);
+    - attributi mai nominati da nessuna query (meno sicuri se la tabella è letta con
+      SELECT *: vengono letti, ma forse non servono);
+    - attributi scritti ma mai letti né usati in una WHERE o JOIN;
+    - tabelle solo scritte e mai lette (log, tracciamenti, dati che nessuno rilegge);
+    - attributi scritti sempre con lo stesso valore (spesso NULL: mai valorizzati).
+      Le funzioni come NOW() non contano: danno un valore nuovo ogni volta.
+  Ripetitivi
+    - due attributi che ricevono lo stesso valore in tutte le esecuzioni
+      (es. data_ins e data_mod): uno dei due è forse superfluo;
+    - attributi copiati dalla tabella collegata (3a forma normale: ordini.citta che c'è
+      già in clienti, raggiungibile con la chiave esterna);
+    - gruppi ripetuti (telefono1, telefono2...: 1a forma normale);
+    - tabelle con la stessa struttura (copie, backup, tabelle divise per anno);
+    - collegamenti ridondanti.
+  "Show" sceglie quali livelli mostrare. Sono indizi da verificare: il log copre un
+  periodo, e procedure, trigger, report o altri programmi possono usare ciò che il log
+  non mostra.
+
+Salvare i file
+  Il riquadro "Save files", sotto gli avvisi, salva:
+    - "Tables used / not used (.csv)": TUTTE le tabelle del dump, una riga ciascuna:
+      usata o no dal log, operazioni ed esecuzioni, area, sottogruppo, categoria, numero
+      di attributi, chiave primaria, chiavi esterne, da chi è puntata, suggerimenti.
+    - "Keys, areas & suggestions (.md)": il rapporto completo di chiavi, relazioni, aree,
+      suggerimenti ed elenco delle tabelle non usate (si apre con un editor di testo).
+    - "CREATE TABLE script (.sql)": i CREATE TABLE originali del dump per le tabelle usate
+      (tipi, ENGINE, COMMENT restano com'erano), divisi per area e, dentro l'area, con
+      prima le tabelle puntate. Dentro ogni CREATE sono aggiunte le chiavi esterne
+      dedotte: attive quelle ad affidabilità alta con tipi compatibili, commentate con --
+      le altre (media affidabilità, tipi diversi, tabella non inclusa, ridondanti,
+      tabelle MyISAM o partizionate), con il motivo. Per le tabelle senza chiave primaria
+      c'è la proposta, commentata. In fondo gli ALTER TABLE che il dump aveva per quelle
+      tabelle. Lo script inizia con SET FOREIGN_KEY_CHECKS = 0.
+    - "Dump with data (.sql)": il dump ridotto alle sole tabelle usate: struttura, dati
+      (INSERT, COPY di PostgreSQL), LOCK/UNLOCK, ALTER e indici, più le impostazioni
+      globali (SET...). Viste, procedure, funzioni e trigger vengono tolti, perché possono
+      usare tabelle escluse. Il dump viene riletto a pezzi e copiato byte per byte, quindi
+      funziona anche con dump di molti GB (ci vuole il tempo di rileggerlo); il file
+      viene scritto direttamente su disco.
+  Con il menu "Tables" si sceglie se il CREATE e il dump riguardano tutte le tabelle
+  usate o solo quelle di un'area.
+  I file si riferiscono all'ultima analisi: se il programma viene riavviato bisogna
+  premere di nuovo "Analyse".
 
 In fondo: le tabelle del dump che il log non usa mai.
 "Results (.csv)" salva tutto in un file apribile con Excel, una riga per ogni

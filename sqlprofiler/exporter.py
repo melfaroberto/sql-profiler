@@ -208,9 +208,10 @@ def table_report(storage, schema, session=None):
     return {"tables": used, "unused": unused, "schema_tables": len(schema.tables) if schema else 0}
 
 
-def er_diagram(storage, analyzer, session=None):
+def er_diagram(storage, analyzer, session=None, full=False):
     """ER subgraph (as for one query) of every table used by session and its sub-sessions (default: the whole
-    profile): their key columns, the columns used, the schema links among them and the joins observed."""
+    profile): their key columns, the columns used (full: every column), the schema links among them and the
+    joins observed."""
     tables = storage.table_usage(session)
     analysis = {
         "tables": [{"name": t["table"], "access": "/".join(t["access"])} for t in tables],
@@ -219,7 +220,7 @@ def er_diagram(storage, analyzer, session=None):
                                                              j["right_table"], j["right_column"]))
                   for j in storage.joins_usage(session)],
     }
-    return analyzer.er_subgraph(analysis)
+    return analyzer.er_subgraph(analysis, full)
 
 
 def _scopes(storage, session=None):
@@ -373,6 +374,8 @@ table.list th { color: var(--muted); } td.num { text-align: right; }
 .er-table text.used { font-weight: 700; }
 .er-link { fill: none; stroke-width: 1.6; } .er-link.declared { stroke: var(--primary); }
 .er-link.inferred { stroke: var(--ok); stroke-dasharray: 5 3; } .er-link.possible { stroke: #8e24aa; stroke-dasharray: 8 4 2 4; } .er-link.observed { stroke: var(--warn); stroke-dasharray: 2 3; stroke-width: 2; }
+.er-mark { fill: none; stroke-width: 1.6; } .er-mark.hole { fill: var(--panel); } .er-mark.declared { stroke: var(--primary); }
+.er-mark.inferred { stroke: var(--ok); } .er-mark.possible { stroke: #8e24aa; } .er-mark.observed { stroke: var(--warn); }
 @media print { .tools { display: none; } .er-box { height: auto; min-height: 0; border: 0; } }
 """
 

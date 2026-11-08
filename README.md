@@ -23,7 +23,10 @@ The full specification is in [SPECIFICATION.md](SPECIFICATION.md).
 
 The **Static analysis** section (menu at the top, next to *Live session*) takes a folder of `.sql` files (the database
 dump) and a `.csv` log with the columns `event_time`, `command_type`, `query`, and shows the tables used divided by
-SELECT, INSERT, UPDATE and DELETE, with the attributes used highlighted, plus a diagram of their links. It works on the
+SELECT, INSERT, UPDATE and DELETE, with the attributes used highlighted, plus a diagram of their links. It also analyses the keys of the tables used as sql-fk-finder does (primary and foreign
+keys, 1:1 / 1:N / N:M relations, tables divided into areas and categories), suggests tables and attributes that look
+irrelevant or repetitive, and saves the list of the tables used / not used, a CREATE TABLE script of the tables used
+with the keys found, and a dump (structure and data) of those tables only. It works on the
 files alone: no proxy, no database connection, nothing stored. See `ANALISI_STATICA.txt`.
 
 ## Desktop app
@@ -121,6 +124,12 @@ those tables and their links. *Tables of the profile*, at the bottom of the sess
 for the whole profile, with the schema tables never used. *⬇ Download* (session or profile) saves the queries
 (.md / .json), the tables and attributes (.md / .csv) and the diagram as a standalone page (.html, works
 offline, printable to PDF).
+
+The **ER diagram** section (next to *Live session* and *Static analysis*) draws, full screen, the ER diagram of
+the tables of the static analysis, of the whole profile or of one session: attributes shown (keys, keys + used,
+all), kinds of link, one area at a time, tables that can be hidden, found, dragged and selected (a table and the
+tables linked to it are highlighted, with their links listed). Line ends use the crow's foot notation (|| one,
+o| zero or one, crow's foot many); the diagram is saved as .png / .svg as it is on the screen.
 
 ## Try it with the demo application
 

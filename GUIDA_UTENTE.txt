@@ -372,6 +372,21 @@ TABELLE DEL PROFILO (USATE E MAI USATE)
     - i pulsanti per scaricare tabelle e attributi (.csv / .md) e il
       diagramma (.html) dell'intero profilo.
 
+DIAGRAMMA ER (SEZIONE "ER diagram")
+  In alto, accanto a "Live session" e "Static analysis", la sezione "ER diagram"
+  mostra a tutto schermo il diagramma ER delle tabelle usate e dei loro
+  collegamenti. Ci si arriva anche con "◇ ER diagram" su una sessione o con
+  "⤢ ER diagram" sul diagramma dell'analisi statica.
+    - "Tables of": analisi statica, tutto il profilo o una sessione (↻ rilegge,
+      utile mentre registri);
+    - "Attributes": solo chiavi, chiavi + usati, tutti;
+    - "Links": tipi di collegamento da mostrare; "Area": un gruppo di tabelle;
+    - elenco tabelle: casella = mostra/nascondi, nome = trova nel diagramma.
+  Clic su una tabella = evidenzia le tabelle collegate e mostra i dettagli;
+  trascinala per spostarla; rotellina = zoom; "Re-arrange" ridispone tutto.
+  Estremità delle linee: || esattamente uno, o| zero o uno, zampa di gallina =
+  molti. "⬇ .png" / "⬇ .svg" salvano il diagramma così come lo vedi.
+
 Consigli:
   - Una sessione per ogni azione, con un nome chiaro.
   - Aspetta che il programma abbia finito prima di premere "Stop".

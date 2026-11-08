@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-from . import exporter, staticmap
+from . import exporter, schemaout, staticmap
 
 log = logging.getLogger("sqlprofiler.server")
 WEB = Path(__file__).parent / "web"
@@ -56,6 +56,7 @@ class WebSocketHub:
 
 def build_app(profiler):
     app = web.Application(client_max_size=4 * 1024 * 1024)
+    last_static = {}                    # the last static analysis: its files are made from it
 
     async def no_cache(request, response):
         if request.path.startswith("/static/"):      # always serve the current UI after an update
@@ -225,10 +226,12 @@ def build_app(profiler):
 
     @routes.get("/api/er")
     async def er(request):
-        """?session=ID (default: the whole profile): ER diagram of the tables used and their links."""
+        """?session=ID (default: the whole profile) &full=1 (every column, not only keys and used ones):
+        ER diagram of the tables used and their links."""
         session = request.query.get("session") or None
+        full = request.query.get("full") == "1"
         return _json(await asyncio.get_running_loop().run_in_executor(
-            None, exporter.er_diagram, profiler.storage, profiler.analyzer(profiler.dialect()), session))
+            None, exporter.er_diagram, profiler.storage, profiler.analyzer(profiler.dialect()), session, full))
 
     @routes.get("/api/er/export")
     async def er_export(request):
@@ -250,13 +253,56 @@ def build_app(profiler):
         """{dump: folder of .sql files, log: .csv file}: tables and attributes used, by operation. Nothing is stored."""
         body = await _body(request)
         try:
-            return _json(await asyncio.get_running_loop().run_in_executor(
-                None, staticmap.analyse, body.get("dump"), body.get("log")))
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, staticmap.analyse, body.get("dump"), body.get("log"))
+            last_static.clear()
+            last_static.update(result.pop("_context"), result=result)
+            return _json(result)
         except (ValueError, OSError) as e:
             return _json({"error": str(e)}, 400)
         except Exception as e:                       # a bad file must not end with a bare "Internal Server Error"
             log.exception("static analysis failed")
             return _json({"error": f"The files could not be analysed: {e}"}, 500)
+
+    @routes.get("/api/static/export")
+    async def static_export(request):
+        """Files of the last static analysis. ?kind=tables (.csv: every table, used or not) | report (.md: keys, areas,
+        suggestions) | create (.sql: CREATE TABLE of the tables used) | dump (.sql: those tables with their data);
+        &area=NAME limits create and dump to one area."""
+        if not last_static:
+            return _json({"error": "Run the analysis first."}, 409)
+        kind, area = request.query.get("kind", ""), request.query.get("area", "")
+        if kind == "check":
+            return _json({"ok": True})
+        result, catalog = last_static["result"], last_static["catalog"]
+        base = "static-" + _safe_name(re.sub(r"\.[^.]*$", "", result["log"])) + (f"-{_safe_name(area)}" if area else "")
+        loop = asyncio.get_running_loop()
+        if kind in ("tables", "report"):
+            text = (schemaout.tables_csv(result, catalog) if kind == "tables" else schemaout.report_md(result))
+            ext, ctype = ("csv", "text/csv") if kind == "tables" else ("md", "text/markdown")
+            return web.Response(text=text, content_type=ctype, charset="utf-8", headers={
+                "Content-Disposition": f'attachment; filename="{base}-{"tables" if kind == "tables" else "keys"}.{ext}"'})
+        names = schemaout.chosen_tables(catalog, result["keys"], area or None)
+        if not names:
+            return _json({"error": f"No table of the dump in the area {area!r}."}, 404)
+        title = result["log"] + (f", area {area}" if area else "")
+        if kind == "create":
+            text = await loop.run_in_executor(None, schemaout.create_script, catalog, result["keys"], names, title)
+            return web.Response(text=text, content_type="application/sql", charset="utf-8", headers={
+                "Content-Disposition": f'attachment; filename="{base}-create.sql"'})
+        if kind == "dump":
+            response = web.StreamResponse(headers={"Content-Type": "application/sql; charset=utf-8",
+                                                   "Content-Disposition": f'attachment; filename="{base}-dump.sql"'})
+            await response.prepare(request)
+            chunks = schemaout.dump_chunks(last_static["files"], names, title)
+            while True:
+                chunk = await loop.run_in_executor(None, next, chunks, None)
+                if chunk is None:
+                    break
+                await response.write(chunk)
+            await response.write_eof()
+            return response
+        return _json({"error": f"Unknown kind {kind!r}."}, 400)
 
     # ------------------------------------------------------------------ export
 

@@ -2,11 +2,15 @@
 // Mini ER diagram of the tables involved in one query: each table is a box with its key columns and the
 // columns the query uses; lines go from the foreign-key column to the referenced column.
 // Referenced ("parent") tables are placed left of the tables that point to them. Wheel = zoom, drag = pan.
+// The ends of the foreign keys use the crow's foot notation: on the referenced side || (mandatory) or o| (optional),
+// on the side of the foreign key a crow's foot (many) or a bar (one: the key is unique or the whole primary key).
+// With opts.interactive the tables can be dragged and clicked (the one clicked and its neighbours are highlighted).
 
 const MiniER = (() => {
   const NS = "http://www.w3.org/2000/svg";
   const ROW = 18, HEAD = 24, PAD = 8, CHAR = 6.9, GAP_X = 90, GAP_Y = 26, MIN_W = 150;
   const norm = s => String(s || "").toLowerCase();
+  let drawings = 0;
 
   const el = (tag, attrs = {}, text) => {
     const n = document.createElementNS(NS, tag);
@@ -28,14 +32,25 @@ const MiniER = (() => {
     }
   }
 
-  /** Every edge as {parent, pcol, child, ccol, kind}: parents are the referenced tables. */
+  /** Cardinality of a foreign key made of the columns cols of table t: {many, mandatory}. */
+  function cardinality(t, cols) {
+    if (!t) return { many: true, mandatory: false };
+    const found = cols.map(n => t.columns.find(c => norm(c.name) === norm(n)));
+    const pk = t.columns.filter(c => c.pk).map(c => norm(c.name)).sort().join(",");
+    const one = (found.length === 1 && found[0] && found[0].unique) || (pk && cols.map(norm).sort().join(",") === pk);
+    return { many: !one, mandatory: found.every(c => c && c.not_null) };
+  }
+
+  /** Every edge as {parent, pcol, child, ccol, kind, many, mandatory}: parents are the referenced tables. */
   function edges(er) {
     const out = [];
-    for (const l of er.links || []) {
-      l.from_cols.forEach((c, i) => out.push({ parent: norm(l.to), pcol: l.to_cols[i] || l.to_cols[0], child: norm(l.from),
-                                               ccol: c, kind: l.kind === "declared" ? "declared" : l.kind === "inferred-media" ? "possible" : "inferred" }));
-    }
     const byName = Object.fromEntries(er.tables.map(t => [norm(t.name), t]));
+    for (const l of er.links || []) {
+      const card = cardinality(byName[norm(l.from)], l.from_cols);
+      l.from_cols.forEach((c, i) => out.push({ parent: norm(l.to), pcol: l.to_cols[i] || l.to_cols[0], child: norm(l.from),
+                                               ccol: c, kind: l.kind === "declared" ? "declared" : l.kind === "inferred-media" ? "possible" : "inferred",
+                                               ...card }));
+    }
     for (const j of er.observed || []) {
       // the parent is the side whose column is the whole primary key (then: part of it)
       const score = (t, col) => {
@@ -121,7 +136,7 @@ const MiniER = (() => {
   }
 
   function drawTable(t) {
-    const g = el("g", { class: "er-table" + (t.known ? "" : " unknown"), transform: `translate(${t.x},${t.y})` });
+    const g = el("g", { class: "er-table" + (t.known ? "" : " unknown"), transform: `translate(${t.x},${t.y})`, "data-name": norm(t.name) });
     g.append(el("rect", { class: "body", width: t.w, height: t.h, rx: 5 }));
     g.append(el("rect", { class: "head", width: t.w, height: HEAD, rx: 5 }));
     g.append(el("rect", { class: "head", y: HEAD - 6, width: t.w, height: 6 }));
@@ -170,7 +185,7 @@ const MiniER = (() => {
     return svg;
   }
 
-  function drawEdge(e, byName) {
+  function edgePath(e, byName) {
     const p = byName[e.parent], c = byName[e.child];
     const y1 = rowY(p, e.pcol), y2 = rowY(c, e.ccol);
     let d;
@@ -187,55 +202,113 @@ const MiniER = (() => {
       const x1 = p.x + p.w, x2 = c.x + c.w, x = Math.max(x1, x2) + 36;
       d = `M${x1},${y1} C${x},${y1} ${x},${y2} ${x2},${y2}`;
     }
-    const path = el("path", { class: `er-link ${e.kind}`, d, "marker-start": `url(#er-one-${e.kind})` });
+    return d;
+  }
+
+  // ids: every drawing on the page has its own markers (url(#id) would pick those of a hidden drawing)
+  function drawEdge(e, byName, ids = "") {
+    const p = byName[e.parent], c = byName[e.child];
+    const ends = e.kind === "observed" ? { "marker-start": `url(#${ids}er-one-${e.kind})` }
+      : { "marker-start": `url(#${ids}er-${e.mandatory ? "p1" : "p0"}-${e.kind})`, "marker-end": `url(#${ids}er-${e.many ? "cn" : "c1"}-${e.kind})` };
+    const path = el("path", { class: `er-link ${e.kind}`, d: edgePath(e, byName), ...ends });
+    const relation = e.kind === "observed" ? "" : `\n${e.many ? "1:N" : "1:1"} · ${e.mandatory ? "mandatory" : "optional"}`;
     path.append(el("title", {}, `${c.name}.${e.ccol} → ${p.name}.${e.pcol}\n${
-      { declared: "declared foreign key", inferred: "foreign key inferred from the names", possible: "possible foreign key: the column name points to this table", observed: "join observed in this query (not in the schema)" }[e.kind]}`));
+      { declared: "declared foreign key", inferred: "foreign key inferred from the names", possible: "possible foreign key: the column name points to this table", observed: "join observed in this query (not in the schema)" }[e.kind]}${relation}`));
     return path;
   }
 
-  function markers() {
+  // the ends of the lines, in the direction of the line: the referenced side starts at x = 0, the other ends at x = 16
+  const ENDS = {
+    one: { ref: 1, shapes: [["path", { d: "M2,1 L2,11" }]] },
+    p1: { ref: 0, shapes: [["path", { d: "M4,1 L4,11 M8,1 L8,11" }]] },                               // exactly one
+    p0: { ref: 0, shapes: [["path", { d: "M4,1 L4,11" }], ["circle", { cx: 10.5, cy: 6, r: 3, class: "hole" }]] },  // zero or one
+    cn: { ref: 16, shapes: [["path", { d: "M3,6 L16,1 M3,6 L16,6 M3,6 L16,11" }]] },                // many
+    c1: { ref: 16, shapes: [["path", { d: "M11,1 L11,11" }]] },                                     // one
+  };
+
+  function markers(ids = "") {
     const defs = el("defs");
     for (const kind of ["declared", "inferred", "possible", "observed"]) {
-      const m = el("marker", { id: `er-one-${kind}`, viewBox: "0 0 10 10", refX: 1, refY: 5, markerWidth: 8, markerHeight: 8, orient: "auto" });
-      m.append(el("path", { d: "M2,0 L2,10", class: `er-link ${kind}` }));
-      defs.append(m);
+      for (const [name, end] of Object.entries(ENDS)) {
+        const m = el("marker", { id: `${ids}er-${name}-${kind}`, viewBox: "0 0 16 12", refX: end.ref, refY: 6, markerWidth: 16, markerHeight: 12,
+                                 markerUnits: "userSpaceOnUse", orient: "auto" });
+        end.shapes.forEach(([tag, attrs]) => m.append(el(tag, { ...attrs, class: `er-mark ${kind} ${attrs.class || ""}` })));
+        defs.append(m);
+      }
     }
     return defs;
   }
 
-  // opts.graph: lay out with dagre (see graphLayout)
+  /** The tables with only their key columns and the ones used (the others are counted in "more columns"). */
+  function compact(er) {
+    return { ...er, tables: (er.tables || []).map(t => {
+      const shown = (t.columns || []).filter(c => c.pk || c.fk || (c.used && c.used.length));
+      return { ...t, columns: shown, hidden: (t.hidden || 0) + (t.columns || []).length - shown.length };
+    }) };
+  }
+
+  /** Places the tables at the saved positions ({name: {x, y}}); the ones without a position go below. */
+  function place(tables, es, positions) {
+    const missing = tables.filter(t => !positions[norm(t.name)]);
+    let size = { width: 0, height: 0 };
+    if (missing.length) size = graphLayout(missing, es.filter(e => missing.some(t => norm(t.name) === e.parent) && missing.some(t => norm(t.name) === e.child)));
+    const placed = tables.filter(t => positions[norm(t.name)]);
+    placed.forEach(t => { t.x = positions[norm(t.name)].x; t.y = positions[norm(t.name)].y; });
+    if (placed.length && missing.length) {
+      const bottom = Math.max(...placed.map(t => t.y + t.h)) + GAP_X, left = Math.min(...placed.map(t => t.x));
+      missing.forEach(t => { t.x += left; t.y += bottom; });
+    }
+    return bounds(tables, size);
+  }
+
+  function bounds(tables) {
+    if (!tables.length) return { x: 0, y: 0, width: 1, height: 1 };
+    const x = Math.min(...tables.map(t => t.x)), y = Math.min(...tables.map(t => t.y));
+    return { x, y, width: Math.max(...tables.map(t => t.x + t.w)) - x, height: Math.max(...tables.map(t => t.y + t.h)) - y };
+  }
+
+  // opts.graph: lay out with dagre (see graphLayout); opts.positions: {name: {x, y}} kept from a previous drawing;
+  // opts.interactive: tables can be dragged and selected, opts.onSelect(name or null) is told
   function render(container, er, opts = {}) {
     container.innerHTML = "";
     const tables = (er.tables || []).map(t => ({ ...t, columns: t.columns || [] }));
     if (!tables.length) {
-      container.innerHTML = '<div class="placeholder">No tables in this statement.</div>';
-      return;
+      container.innerHTML = `<div class="placeholder">${opts.empty || "No tables in this statement."}</div>`;
+      return { reset() {}, positions: () => ({}), select() {} };
     }
     tables.forEach(measure);
     const es = edges({ ...er, tables });
-    const size = opts.graph ? graphLayout(tables, es) : layout(tables, es);
+    if (opts.positions) place(tables, es, opts.positions);
+    else if (opts.graph) graphLayout(tables, es);
+    else layout(tables, es);
     const byName = Object.fromEntries(tables.map(t => [norm(t.name), t]));
 
     const margin = 30;
+    const ids = `d${++drawings}-`;
     const svg = el("svg", { xmlns: NS });
-    svg.append(markers());
+    svg.append(markers(ids));
     const world = el("g");
-    es.forEach(e => world.append(drawEdge(e, byName)));
-    tables.forEach(t => world.append(drawTable(t)));
+    const paths = es.map(e => { const p = drawEdge(e, byName, ids); world.append(p); return p; });
+    const groups = {};
+    tables.forEach(t => { groups[norm(t.name)] = drawTable(t); world.append(groups[norm(t.name)]); });
     svg.append(world);
     container.append(svg);
 
     // view box: fit, then wheel zoom and drag pan
-    const fit = { x: -margin, y: -margin, w: size.width + 2 * margin + 40, h: size.height + 2 * margin };
-    // never enlarge small diagrams (one or two tables) beyond their natural size
-    const box = container.getBoundingClientRect();
-    for (const [len, pos, min] of [["w", "x", box.width || 600], ["h", "y", box.height || 300]]) {
-      if (fit[len] < min) {
-        fit[pos] -= (min - fit[len]) / 2;
-        fit[len] = min;
+    const fitBox = () => {
+      const b = bounds(tables);
+      const fit = { x: b.x - margin, y: b.y - margin, w: b.width + 2 * margin + 40, h: b.height + 2 * margin };
+      // never enlarge small diagrams (one or two tables) beyond their natural size
+      const box = container.getBoundingClientRect();
+      for (const [len, pos, min] of [["w", "x", box.width || 600], ["h", "y", box.height || 300]]) {
+        if (fit[len] < min) {
+          fit[pos] -= (min - fit[len]) / 2;
+          fit[len] = min;
+        }
       }
-    }
-    let vb = { ...fit };
+      return fit;
+    };
+    let vb = fitBox();
     const apply = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
     apply();
     svg.addEventListener("wheel", ev => {
@@ -249,19 +322,76 @@ const MiniER = (() => {
       vb = { x: mx - (mx - vb.x) * k, y: my - (my - vb.y) * k, w: vb.w * k, h: vb.h * k };
       apply();
     }, { passive: false });
-    let drag = null;
-    svg.addEventListener("pointerdown", ev => { drag = { x: ev.clientX, y: ev.clientY, vb: { ...vb } }; svg.classList.add("drag"); svg.setPointerCapture(ev.pointerId); });
+    let drag = null, selected = null;
+    const select = name => {
+      selected = name && byName[norm(name)] ? norm(name) : null;
+      const near = new Set(selected ? [selected] : []);
+      es.forEach((e, i) => {
+        const on = selected && (e.parent === selected || e.child === selected);
+        if (on) { near.add(e.parent); near.add(e.child); }
+        paths[i].classList.toggle("near", !!on);
+      });
+      svg.classList.toggle("has-sel", !!selected);
+      for (const [k, g] of Object.entries(groups)) {
+        g.classList.toggle("sel", k === selected);
+        g.classList.toggle("near", near.has(k) && k !== selected);
+      }
+      if (opts.onSelect) opts.onSelect(selected ? byName[selected].name : null);
+    };
+    svg.addEventListener("pointerdown", ev => {
+      if (ev.button !== 0) return;
+      const g = opts.interactive && ev.target.closest(".er-table");
+      const t = g && byName[g.dataset.name];
+      drag = { x: ev.clientX, y: ev.clientY, vb: { ...vb }, table: t, tx: t && t.x, ty: t && t.y, moved: false };
+      if (t) world.append(g);                            // on top of the others while it moves
+      svg.classList.add("drag");
+      svg.setPointerCapture(ev.pointerId);
+    });
     svg.addEventListener("pointermove", ev => {
       if (!drag) return;
+      if (Math.abs(ev.clientX - drag.x) + Math.abs(ev.clientY - drag.y) > 3) drag.moved = true;
+      if (!drag.moved) return;
       const r = svg.getBoundingClientRect();
       const scale = Math.max(vb.w / r.width, vb.h / r.height);
+      if (drag.table) {
+        const t = drag.table, k = norm(t.name);
+        t.x = drag.tx + (ev.clientX - drag.x) * scale;
+        t.y = drag.ty + (ev.clientY - drag.y) * scale;
+        groups[k].setAttribute("transform", `translate(${t.x},${t.y})`);
+        es.forEach((e, i) => { if (e.parent === k || e.child === k) paths[i].setAttribute("d", edgePath(e, byName)); });
+        return;
+      }
       vb = { ...vb, x: drag.vb.x - (ev.clientX - drag.x) * scale, y: drag.vb.y - (ev.clientY - drag.y) * scale };
       apply();
     });
-    const end = () => { drag = null; svg.classList.remove("drag"); };
+    const end = ev => {
+      if (drag && !drag.moved && opts.interactive && ev.type === "pointerup") {
+        const k = drag.table && norm(drag.table.name);
+        select(k && k !== selected ? k : null);
+      }
+      if (drag && drag.moved && drag.table && opts.onMove) opts.onMove(drag.table.name);
+      drag = null;
+      svg.classList.remove("drag");
+    };
     svg.addEventListener("pointerup", end);
     svg.addEventListener("pointercancel", end);
-    return { reset: () => { vb = { ...fit }; apply(); } };
+    return {
+      reset: () => { vb = fitBox(); apply(); },
+      positions: () => Object.fromEntries(tables.map(t => [norm(t.name), { x: t.x, y: t.y }])),
+      select,
+      // centres the view on a table, at a readable zoom
+      focus(name) {
+        const t = byName[norm(name)];
+        if (!t) return;
+        const r = svg.getBoundingClientRect();
+        const w = Math.max(vb.w, 1), h = Math.max(vb.h, 1);
+        const k = Math.min(1, Math.max((r.width || 600) * 1.1 / w, 0.25));   // zoom in up to about 1:1
+        const nw = w * k, nh = h * k;
+        vb = { x: t.x + t.w / 2 - nw / 2, y: t.y + t.h / 2 - nh / 2, w: nw, h: nh };
+        apply();
+        select(name);
+      },
+    };
   }
 
   // ---------------------------------------------------------------------- the diagram as an image file
@@ -284,20 +414,27 @@ const MiniER = (() => {
     .er-link { fill: none; stroke-width: 1.6; } .er-link.declared { stroke: #1f4e79; }
     .er-link.inferred { stroke: #2e7d32; stroke-dasharray: 5 3; } .er-link.possible { stroke: #8e24aa; stroke-dasharray: 8 4 2 4; }
     .er-link.observed { stroke: #c25e00; stroke-dasharray: 2 3; stroke-width: 2; }
+    .er-mark { fill: none; stroke-width: 1.6; } .er-mark.hole { fill: #fff; } .er-mark.declared { stroke: #1f4e79; }
+    .er-mark.inferred { stroke: #2e7d32; } .er-mark.possible { stroke: #8e24aa; } .er-mark.observed { stroke: #c25e00; }
     .img-title { font-size: 18px; font-weight: 700; fill: #1d2330; } .img-sub, .img-legend { font-size: 12px; fill: #5f6b7a; }`;
   const LEGEND = [["declared", "declared foreign key"], ["inferred", "inferred from the names"],
                   ["possible", "possible (column name points to the table)"], ["observed", "join in the log, not in the schema"]];
 
   /** {svg: text of a standalone .svg file, width, height}: title, diagram and legend. */
-  function toSvg(er, { title = "", subtitle = "", graph = true } = {}) {
+  function toSvg(er, { title = "", subtitle = "", graph = true, positions = null } = {}) {
     const tables = (er.tables || []).map(t => ({ ...t, columns: t.columns || [] }));
     tables.forEach(measure);
     const es = edges({ ...er, tables });
-    const size = graph ? graphLayout(tables, es) : layout(tables, es);
+    if (positions) place(tables, es, positions);
+    else if (graph) graphLayout(tables, es);
+    else layout(tables, es);
+    const b = bounds(tables);
+    tables.forEach(t => { t.x -= b.x; t.y -= b.y; });
+    const size = { width: b.width, height: b.height };
     const byName = Object.fromEntries(tables.map(t => [norm(t.name), t]));
     const margin = 30, top = margin + 52, legendH = 56;
     // a loop or a route around a table can leave the boxes on the right
-    const width = Math.ceil(Math.max(size.width + 60, 900) + 2 * margin), height = Math.ceil(top + size.height + legendH + margin);
+    const width = Math.ceil(Math.max(size.width + 60, 1060) + 2 * margin), height = Math.ceil(top + size.height + legendH + margin);
     const svg = el("svg", { xmlns: NS, width, height, viewBox: `0 0 ${width} ${height}` });
     svg.append(el("style", {}, IMAGE_CSS), markers());
     svg.append(el("rect", { width, height, fill: "#ffffff" }));
@@ -315,7 +452,7 @@ const MiniER = (() => {
       x += 34 + label.length * 6.2 + 24;
     }
     legend.append(el("text", { class: "img-legend", x: 0, y: 22 },
-      "R / W / D = read / write / delete · highlighted = columns used by the log (red = written) · grey header = table not in the dumps"));
+      "line ends: || exactly one · o| zero or one · crow's foot = many · R / W / D = read / write / delete · highlighted = columns used by the log (red = written) · grey header = table not in the dumps"));
     svg.append(legend);
     return { svg: new XMLSerializer().serializeToString(svg), width, height };
   }
@@ -374,5 +511,5 @@ const MiniER = (() => {
     });
   }
 
-  return { render, toSvg, toPng, tableBox, tablesToSvg };
+  return { render, toSvg, toPng, tableBox, tablesToSvg, compact, edges };
 })();

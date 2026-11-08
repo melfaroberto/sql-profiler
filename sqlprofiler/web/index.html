@@ -14,6 +14,7 @@
     <div class="seg mode-seg" id="mode-menu" role="tablist" aria-label="Section">
       <button type="button" data-mode-to="live" class="on" title="Capture the queries of a running application">Live session</button>
       <button type="button" data-mode-to="static" title="Analyse a dump folder and a .csv log, without any connection">Static analysis</button>
+      <button type="button" data-mode-to="er" title="ER diagram of the tables used and their links: of the static analysis, of the profile or of one session">ER diagram</button>
     </div>
     <div id="proxies" class="chips"></div>
     <div class="spacer"></div>
@@ -73,6 +74,7 @@
         </div>
         <div class="session-actions">
           <button id="session-overview" class="small" type="button" title="Tables, attributes and diagram of this session">▦ Overview</button>
+          <button id="session-er" class="small" type="button" title="Open the tables of this session in the ER diagram section">◇ ER diagram</button>
           <div class="menu-wrap">
             <button id="session-export" class="small" type="button" title="Download this session, with its sub-actions">⬇ Download ▾</button>
             <div id="session-export-menu" class="menu" hidden>
@@ -162,6 +164,17 @@
       <div id="static-stats" class="stats"></div>
       <div id="static-facts" class="facts"></div>
       <div id="static-problems" class="note-box static-notes" hidden></div>
+      <div class="static-card static-save">
+        <div class="static-save-head"><b>Save files</b>
+          <span class="muted">made from the tables the log uses, with their keys</span>
+          <label class="static-area-pick">Tables <select id="static-area" title="All the tables used, or only those of one area"></select></label></div>
+        <div class="static-save-buttons">
+          <button class="small" type="button" data-sx="tables" title="Every table of the dump, used or not, with operations, area, category and keys (opens in Excel)">⬇ Tables used / not used (.csv)</button>
+          <button class="small" type="button" data-sx="report" title="Primary and foreign keys, relations, areas and suggestions">⬇ Keys, areas &amp; suggestions (.md)</button>
+          <button class="small primary" type="button" data-sx="create" title="The CREATE TABLE statements of the dump for these tables, divided by area, with the foreign keys found">⬇ CREATE TABLE script (.sql)</button>
+          <button class="small" type="button" data-sx="dump" title="The statements of the dump that belong to these tables: structure and data. Big dumps take a while.">⬇ Dump with data (.sql)</button>
+        </div>
+      </div>
       <div class="static-tools">
         <input id="static-filter" type="search" placeholder="Filter tables or attributes…">
         <span class="op-legend"><span><i class="read"></i>read</span><span><i class="filter"></i>filter (WHERE / JOIN)</span>
@@ -174,7 +187,8 @@
       <div id="static-groups" class="static-groups"></div>
       <h3>Diagram of the tables used and their links</h3>
       <div class="static-er"><div class="er-box"><div id="static-canvas" style="height:100%"></div>
-        <div class="er-tools"><button class="small" type="button" id="static-fit">Fit</button>
+        <div class="er-tools"><button class="small primary" type="button" id="static-er-open" title="Open this diagram full screen, with filters, areas and movable tables">⤢ ER diagram</button>
+          <button class="small" type="button" id="static-fit">Fit</button>
           <button class="small" type="button" id="static-png">⬇ .png</button>
           <button class="small" type="button" id="static-svg">⬇ .svg</button></div></div>
       <div class="er-legend"><span><i style="border-color:var(--primary)"></i>declared FK</span>
@@ -182,7 +196,83 @@
         <span><i style="border-color:var(--possible);border-top-style:dashed"></i>possible: to check</span>
         <span><i style="border-color:var(--warn);border-top-style:dotted"></i>join in the log, not in the dump</span>
         <span>wheel = zoom · drag = move</span></div></div>
+      <h3>Keys and areas of the tables used</h3>
+      <div id="static-keys-stats" class="stats"></div>
+      <div class="static-tools">
+        <input id="static-keys-filter" type="search" placeholder="Filter tables…">
+        <span class="muted">Areas: tables closely linked by foreign keys. Subgroups: tables with similar names. As in SQL FK Finder.</span>
+      </div>
+      <div id="static-areas" class="static-areas"></div>
+      <details id="static-fks-box" class="static-card static-fold"><summary id="static-fks-title"></summary><div class="table-scroll"><table id="static-fks" class="kv-table"></table></div></details>
+      <details id="static-nopk-box" class="static-card static-fold"><summary id="static-nopk-title"></summary><div class="table-scroll"><table id="static-nopk" class="kv-table"></table></div></details>
+      <h3>Suggestions: irrelevant or repetitive</h3>
+      <div class="static-tools">
+        <label>Show <select id="static-sug-level"><option value="high">high confidence</option><option value="medium" selected>high and medium</option><option value="low">all</option></select></label>
+        <span class="muted">Hints from the log and the dump together, to check: procedures, triggers or other programs can use what this log does not show.</span>
+      </div>
+      <div id="static-suggestions" class="static-suggestions"></div>
       <details id="static-unused-box"><summary id="static-unused-title"></summary><ul id="static-unused" class="unused-list"></ul></details>
+    </div>
+  </section>
+
+  <section id="er-view" class="erv" hidden>
+    <aside class="erv-side">
+      <div class="erv-block">
+        <label for="erv-source">Tables of</label>
+        <div class="erv-row">
+          <select id="erv-source"></select>
+          <button id="erv-reload" class="small" type="button" title="Read the tables again (the live profile changes while you record)">↻</button>
+        </div>
+      </div>
+      <div class="erv-block">
+        <span class="erv-label">Attributes</span>
+        <div class="seg" id="erv-cols">
+          <button type="button" data-cols="keys" title="Only primary and foreign keys">Keys</button>
+          <button type="button" data-cols="used" class="on" title="Keys and the attributes the queries use">Keys + used</button>
+          <button type="button" data-cols="all" title="Every attribute of the tables">All</button>
+        </div>
+      </div>
+      <div class="erv-block">
+        <span class="erv-label">Links</span>
+        <label class="check"><input type="checkbox" data-kind="declared" checked><i class="erv-swatch declared"></i>declared FK</label>
+        <label class="check"><input type="checkbox" data-kind="inferred" checked><i class="erv-swatch inferred"></i>inferred from the names</label>
+        <label class="check"><input type="checkbox" data-kind="possible" checked><i class="erv-swatch possible"></i>possible: to check</label>
+        <label class="check"><input type="checkbox" data-kind="observed" checked><i class="erv-swatch observed"></i>join in the queries only</label>
+        <label class="check erv-sep"><input id="erv-isolated" type="checkbox" checked>Tables without links</label>
+      </div>
+      <div class="erv-block" id="erv-area-block">
+        <label for="erv-area">Area</label>
+        <select id="erv-area"></select>
+      </div>
+      <div class="erv-block erv-list-block">
+        <div class="erv-list-head">
+          <input id="erv-search" type="search" placeholder="Find a table…">
+          <button id="erv-all" class="small" type="button" title="Show every table">All</button>
+          <button id="erv-none" class="small" type="button" title="Hide every table">None</button>
+        </div>
+        <ul id="erv-list" class="erv-list"></ul>
+      </div>
+    </aside>
+    <div class="erv-main">
+      <div class="erv-bar">
+        <span id="erv-stats" class="erv-stats"></span>
+        <div class="spacer"></div>
+        <button id="erv-fit" class="small" type="button" title="The whole diagram in view">Fit</button>
+        <button id="erv-relayout" class="small" type="button" title="Arrange the tables again (forgets where you moved them)">Re-arrange</button>
+        <button id="erv-png" class="small" type="button" title="The diagram as it is now, as an image">⬇ .png</button>
+        <button id="erv-svg" class="small primary" type="button" title="The diagram as it is now, as a vector image">⬇ .svg</button>
+      </div>
+      <div class="er-box erv-box">
+        <div id="erv-canvas" class="erv-canvas"></div>
+        <div id="erv-detail" class="erv-detail" hidden></div>
+      </div>
+      <div class="er-legend"><span><i style="border-color:var(--primary)"></i>declared FK</span>
+        <span><i style="border-color:var(--ok);border-top-style:dashed"></i>inferred from the names</span>
+        <span><i style="border-color:var(--possible);border-top-style:dashed"></i>possible: to check</span>
+        <span><i style="border-color:var(--warn);border-top-style:dotted"></i>join in the queries, not in the schema</span>
+        <span><b>||</b> exactly one · <b>o|</b> zero or one · <b>&lt;</b> many (crow's foot)</span>
+        <span>click a table = its links · drag a table = move it · wheel = zoom · drag the background = move the view</span></div>
+      <div id="erv-error" class="error-box" hidden></div>
     </div>
   </section>
 

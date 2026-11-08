@@ -226,9 +226,9 @@ class QueryAnalyzer:
 
     # ------------------------------------------------------------------ ER subgraph
 
-    def er_subgraph(self, analysis):
-        """Tables involved in one query, with their key columns and the columns the query uses,
-        the schema links among them and the joins observed in the query."""
+    def er_subgraph(self, analysis, full=False):
+        """Tables involved in one query, with their key columns and the columns the query uses (full: every
+        column), the schema links among them and the joins observed in the query."""
         used = {}
         for c in analysis.get("columns", []):
             if c["table"]:
@@ -239,7 +239,7 @@ class QueryAnalyzer:
             mine = used.get(norm(t["name"]), {})
             if info:
                 cols = [dict(c, used=mine.get(norm(c["name"]), [])) for c in info["columns"]]
-                shown = [c for c in cols if c["pk"] or c["fk"] or c["used"]]
+                shown = cols if full else [c for c in cols if c["pk"] or c["fk"] or c["used"]]
                 tables.append({"name": info["name"], "known": True, "access": t["access"], "columns": shown,
                                "hidden": len(cols) - len(shown), "group": info.get("group", "")})
             else:

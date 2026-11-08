@@ -73,6 +73,15 @@ def test_join_not_in_schema_is_a_candidate(tmp_path):
     assert len(er["observed"]) == 1
 
 
+def test_er_subgraph_full_has_every_column(tmp_path):
+    a = QueryAnalyzer("mysql", schema(tmp_path))
+    r = a.analyze("SELECT o.id FROM orders o")
+    compact = {t["name"]: t for t in a.er_subgraph(r)["tables"]}["orders"]
+    full = {t["name"]: t for t in a.er_subgraph(r, full=True)["tables"]}["orders"]
+    assert full["hidden"] == 0 and len(full["columns"]) == len(compact["columns"]) + compact["hidden"]
+    assert compact["hidden"] > 0
+
+
 def test_write_statements(tmp_path):
     a = QueryAnalyzer("mysql", schema(tmp_path))
     r = a.analyze("UPDATE orders SET total = ? WHERE id = ?")

@@ -246,6 +246,7 @@ def _apply_alter(ddl, by_name, links):
     table = by_name.get(norm(m.group("name")).rsplit(".", 1)[-1]) if m else None
     if not table:
         return
+    table.setdefault("alters", []).append(ddl)
     split = lambda text: [norm(c.split("(")[0]) for c in text.split(",") if c.strip()]
     for pk in _ALTER_PK.finditer(ddl):
         wanted = set(split(pk.group("cols")))
@@ -280,6 +281,7 @@ def from_ddl_files(files, dialect="mysql", source=None):
                 continue
             t, l = _table_from_create(tree, dialect)
             if t:
+                t["ddl"], t["file"] = ddl, str(file)     # the original text: the CREATE script of the tables used
                 tables.append(t)
                 links += l
             else:
@@ -305,8 +307,12 @@ def _table_from_create(tree, dialect):
     if not isinstance(schema, exp.Schema) or not isinstance(schema.this, exp.Table):
         return None, []
     name = schema.this.name
-    columns, pk, links = [], set(), []
+    columns, pk, links, unique = [], set(), [], set()
     for item in schema.expressions:
+        if isinstance(item, exp.UniqueColumnConstraint) and isinstance(item.this, exp.Schema):
+            keys = [e.name for e in item.this.expressions]       # UNIQUE KEY name (column)
+            if len(keys) == 1:
+                unique.add(norm(keys[0]))
         if isinstance(item, exp.ColumnDef):
             kinds = [c.args.get("kind") for c in item.args.get("constraints") or []]
             if any(isinstance(k, exp.PrimaryKeyColumnConstraint) for k in kinds):
@@ -328,6 +334,7 @@ def _table_from_create(tree, dialect):
                                   "kind": "declared", "relation": ""})
     for c in columns:
         c["pk"] = norm(c["name"]) in pk
+        c["unique"] = c["unique"] or norm(c["name"]) in unique
     return {"name": name, "group": "", "area": "", "pk_guessed": False, "columns": columns}, _dedupe(links)
 
 
